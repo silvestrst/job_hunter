@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Job Hunter",
+  "version": "0.1.0",
+  "description": "Save the job posting you're looking at to your local job-hunter database.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Job Hunter"
+  },
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://127.0.0.1/*"]
+}

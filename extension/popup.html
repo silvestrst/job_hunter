@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      width: 320px;
+      margin: 0;
+      padding: 12px;
+      background: #fafafa;
+      color: #222;
+    }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    #dot { width: 10px; height: 10px; border-radius: 50%; background: #bbb; flex: none; }
+    #dot.up { background: #2ea043; }
+    #dot.down { background: #d1242f; }
+    #server-state { font-size: 12px; color: #555; }
+    #save {
+      width: 100%;
+      padding: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      background: #1a7f37;
+      color: #fff;
+      cursor: pointer;
+    }
+    #save:disabled { background: #94b8a0; cursor: default; }
+    #message { margin-top: 10px; font-size: 13px; min-height: 18px; white-space: pre-wrap; }
+    #message.error { color: #d1242f; }
+    #message.ok { color: #1a7f37; }
+    #message.warn { color: #9a6700; }
+    details { margin-top: 12px; font-size: 12px; color: #555; }
+    details input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 6px;
+      padding: 6px;
+      font-family: monospace;
+      font-size: 11px;
+    }
+    details label { display: block; margin-top: 8px; }
+    #settings-save { margin-top: 8px; padding: 4px 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div id="dot"></div>
+    <span id="server-state">checking server...</span>
+  </div>
+  <button id="save" disabled>Save this job</button>
+  <div id="message"></div>
+  <details id="settings">
+    <summary>Settings</summary>
+    <label>API token (from <code>job-hunter serve</code>)
+      <input id="token" type="text" placeholder="paste token" />
+    </label>
+    <label>Server port
+      <input id="port" type="text" placeholder="7877" />
+    </label>
+    <button id="settings-save">Save settings</button>
+  </details>
+  <script src="dist/popup.js"></script>
+</body>
+</html>
