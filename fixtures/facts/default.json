@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "extracted": {
+    "job_title": "Senior Rust Engineer",
+    "company": "Acme Ltd",
+    "location": "London, UK",
+    "country": "GB",
+    "work_mode": "remote",
+    "hybrid_days_in_office": null,
+    "remote_restriction": "UK only",
+    "salary": {"min": 90000, "max": 110000, "currency": "GBP", "period": "year", "is_estimate": false, "raw_text": "£90,000 - £110,000"},
+    "employment_type": "permanent",
+    "seniority_level": "senior",
+    "visa_sponsorship": "unspecified",
+    "tech_stack": ["rust", "postgresql", "aws"],
+    "industry": "fintech",
+    "posted_date": null,
+    "summary": "Senior Rust engineer building payment infrastructure at a UK fintech. Remote-first with quarterly meetups."
+  },
+  "fit": {
+    "skill_matches": [
+      {"skill": "rust", "required": true, "years_required": 5, "cv_evidence": "strong", "relevance": 0.95},
+      {"skill": "postgresql", "required": true, "years_required": null, "cv_evidence": "moderate", "relevance": 0.6},
+      {"skill": "kubernetes", "required": false, "years_required": null, "cv_evidence": "weak", "relevance": 0.3}
+    ],
+    "skills_missing": ["kafka"],
+    "seniority_fit": "match",
+    "domain_familiarity": 0.6,
+    "overall_cv_match": 0.82,
+    "red_flags": ["six-stage interview process"],
+    "green_flags": ["salary stated explicitly"],
+    "notes": "Strong core-skills match; the missing Kafka experience is listed as nice-to-have."
+  },
+  "confidence": {"salary": 0.9, "work_mode": 0.85, "overall": 0.85}
+}

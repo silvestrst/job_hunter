@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "extracted": {
+    "job_title": "Rust Developer",
+    "company": "Cheapskate GmbH",
+    "location": "Berlin, Germany",
+    "country": "DE",
+    "work_mode": "onsite",
+    "salary": {"min": 60000, "max": 70000, "currency": "EUR", "period": "year", "is_estimate": false, "raw_text": "60-70k EUR"},
+    "employment_type": "permanent",
+    "seniority_level": "mid",
+    "visa_sponsorship": "no",
+    "tech_stack": ["rust"],
+    "industry": "adtech",
+    "summary": "Mid-level Rust developer, onsite in Berlin."
+  },
+  "fit": {
+    "skill_matches": [
+      {"skill": "rust", "required": true, "cv_evidence": "strong", "relevance": 0.9}
+    ],
+    "skills_missing": [],
+    "seniority_fit": "under",
+    "domain_familiarity": 0.2,
+    "overall_cv_match": 0.55,
+    "red_flags": ["salary below market for the seniority"],
+    "green_flags": [],
+    "notes": "Onsite abroad and under-levelled."
+  },
+  "confidence": {"salary": 0.9, "work_mode": 0.95, "overall": 0.8}
+}

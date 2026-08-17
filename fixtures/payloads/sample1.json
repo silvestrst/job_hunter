@@ -1,0 +1,6 @@
+{
+  "url": "https://boards.example.com/acme/senior-rust-engineer-4821?utm_source=linkedin&utm_medium=social",
+  "title": "Senior Rust Engineer - Acme Ltd | Example Boards",
+  "text": "Senior Rust Engineer\nAcme Ltd - London (Remote, UK only)\n£90,000 - £110,000 per year\n\nWe are building payment infrastructure in Rust. You will own services end to end: design, implementation, deployment on AWS, and operations.\n\nRequirements:\n- 5+ years of production Rust\n- Solid PostgreSQL experience\n- Familiarity with event-driven architectures (Kafka a plus)\n- Kubernetes exposure is nice to have\n\nWe offer a remote-first culture with quarterly meetups in London, private healthcare, and a learning budget.\n\nInterview process: intro call, technical screen, take-home, system design, values interview, final chat with the CTO.",
+  "source": "extension"
+}
