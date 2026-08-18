@@ -1,14 +1,16 @@
 //! The generic assessment facts the LLM must return. Design rules: extracted
 //! facts, normalized units, closed enums, and CV-relative measures only —
 //! never criteria-relative judgments. Unknown values are explicit
-//! ("unspecified"/null). Evolution is additive-only, tracked by
+//! ("unspecified"/null) and never guessed - except salary, which the LLM is
+//! prompted to estimate from role/seniority/location/tech-stack when unstated
+//! (see `Salary::is_estimate`). Evolution is additive-only, tracked by
 //! `schema_version`; unknown JSON fields are tolerated on deserialize so old
 //! binaries can read newer rows.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AssessmentFacts {
@@ -69,6 +71,8 @@ pub struct Salary {
     pub currency: Option<String>,
     #[serde(default)]
     pub period: SalaryPeriod,
+    /// True when the posting didn't state a salary and the LLM inferred this
+    /// range from role/seniority/location/tech-stack instead.
     #[serde(default)]
     pub is_estimate: bool,
     #[serde(default)]
@@ -93,6 +97,11 @@ pub struct Fit {
     pub red_flags: Vec<String>,
     #[serde(default)]
     pub green_flags: Vec<String>,
+    /// Actionable, CV-specific advice for applying to this role (what to
+    /// emphasise, gaps to address, questions to ask) - not used by layer-2
+    /// scoring, shown to the candidate as-is.
+    #[serde(default)]
+    pub suggestions: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -252,6 +261,16 @@ mod tests {
         let out = serde_json::to_string(&facts).unwrap();
         let again: AssessmentFacts = serde_json::from_str(&out).unwrap();
         assert_eq!(again.extracted.salary.max, Some(100000.0));
+    }
+
+    #[test]
+    fn suggestions_round_trip() {
+        let json = r#"{"fit": {"suggestions": ["highlight your Rust experience", "ask about on-call"]}}"#;
+        let facts: AssessmentFacts = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            facts.fit.suggestions,
+            vec!["highlight your Rust experience", "ask about on-call"]
+        );
     }
 
     #[test]

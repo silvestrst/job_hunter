@@ -5,7 +5,7 @@
 /// The JSON contract shown to the agent. Kept as one literal so the schema the
 /// model sees and the serde types in `schema.rs` are reviewed side by side.
 const FACTS_CONTRACT: &str = r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "extracted": {
     "job_title": "string|null", "company": "string|null", "location": "string|null",
     "country": "ISO 3166-1 alpha-2 string|null",
@@ -15,7 +15,8 @@ const FACTS_CONTRACT: &str = r#"{
     "salary": {"min": "number|null", "max": "number|null",
                "currency": "ISO 4217 string|null",
                "period": "year|day|hour|unspecified",
-               "is_estimate": "boolean", "raw_text": "string|null"},
+               "is_estimate": "boolean (true if the posting didn't state a salary and you inferred this range)",
+               "raw_text": "string|null (verbatim as posted; null if inferred)"},
     "employment_type": "permanent|contract|freelance|internship|unspecified",
     "seniority_level": "junior|mid|senior|staff|principal|lead|manager|unspecified",
     "visa_sponsorship": "yes|no|unspecified",
@@ -34,6 +35,7 @@ const FACTS_CONTRACT: &str = r#"{
     "domain_familiarity": "number 0..1 (CV's familiarity with the role's industry)",
     "overall_cv_match": "number 0..1 (holistic CV-to-role match)",
     "red_flags": ["string"], "green_flags": ["string"],
+    "suggestions": ["actionable, CV-specific advice for applying to this role"],
     "notes": "one short paragraph of nuance"
   },
   "confidence": {"salary": "number 0..1", "work_mode": "number 0..1", "overall": "number 0..1"}
@@ -59,9 +61,19 @@ pub fn build_assessment_prompt(
          Hard rules:\n\
          - Extract facts only; never judge against preferences (no \"salary is good\").\n\
          - Numbers as numbers, not prose. Salary in the posting's own currency and period.\n\
-         - Unknown or unstated -> null or \"unspecified\". Never guess.\n\
+         - If the posting states a salary range, set salary.min and salary.max to the range's \
+         low and high ends - never collapse a stated range into one number. A single stated \
+         figure goes in both min and max.\n\
+         - Unknown or unstated -> null or \"unspecified\". Never guess - EXCEPT salary: if the \
+         posting doesn't state one, estimate a realistic market range from the job title, \
+         seniority, location, industry, and tech stack; set salary.is_estimate=true, \
+         salary.raw_text=null, and lower confidence.salary to reflect the guess. If you can't \
+         even guess, leave salary.min/max null.\n\
          - fit.* measures the CV below against this posting.\n\
          - List every skill the posting emphasises in fit.skill_matches, matched or not.\n\
+         - fit.suggestions: 2-4 concrete, actionable suggestions for THIS candidate applying to \
+         THIS posting - what CV experience to foreground, gaps to address or preempt, questions \
+         worth asking. Specific to this CV and posting, not generic career advice.\n\
          {feedback_section}\
          ## Candidate CV\n{cv_text}\n\n\
          ## Job posting\n{job}\n"
@@ -97,6 +109,26 @@ mod tests {
         assert!(p.contains("- avoid agencies"));
         assert!(p.contains("JOB TEXT"));
         assert!(p.contains("schema_version"));
+    }
+
+    #[test]
+    fn instructs_salary_estimation_when_unstated() {
+        let p = build_assessment_prompt("CV", None, "JOB", 100);
+        assert!(p.contains("estimate a realistic market range"));
+        assert!(p.contains("is_estimate=true"));
+    }
+
+    #[test]
+    fn instructs_preserving_stated_salary_ranges() {
+        let p = build_assessment_prompt("CV", None, "JOB", 100);
+        assert!(p.contains("never collapse a stated range into one number"));
+    }
+
+    #[test]
+    fn instructs_actionable_suggestions() {
+        let p = build_assessment_prompt("CV", None, "JOB", 100);
+        assert!(p.contains("fit.suggestions"));
+        assert!(p.contains("\"suggestions\""));
     }
 
     #[test]

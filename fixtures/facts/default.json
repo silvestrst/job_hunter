@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "extracted": {
     "job_title": "Senior Rust Engineer",
     "company": "Acme Ltd",
@@ -29,6 +29,11 @@
     "overall_cv_match": 0.82,
     "red_flags": ["six-stage interview process"],
     "green_flags": ["salary stated explicitly"],
+    "suggestions": [
+      "Lead with your payments/fintech Rust work - it maps directly onto their core stack.",
+      "Address the Kafka gap head-on: mention any adjacent streaming/queue experience.",
+      "Ask about the six-stage process up front to gauge timeline before investing further."
+    ],
     "notes": "Strong core-skills match; the missing Kafka experience is listed as nice-to-have."
   },
   "confidence": {"salary": 0.9, "work_mode": 0.85, "overall": 0.85}

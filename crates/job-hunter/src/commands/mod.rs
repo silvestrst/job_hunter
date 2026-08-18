@@ -91,12 +91,17 @@ pub fn format_salary(facts: &job_hunter_core::assessment::schema::AssessmentFact
         job_hunter_core::assessment::schema::SalaryPeriod::Hour => "/hr",
         _ => "",
     };
-    match (salary.min, salary.max) {
+    let text = match (salary.min, salary.max) {
         (Some(min), Some(max)) if min != max => {
             format!("{symbol}{}-{}{period}", unit(min), unit(max))
         }
         (Some(v), _) | (None, Some(v)) => format!("{symbol}{}{period}", unit(v)),
-        (None, None) => "-".to_string(),
+        (None, None) => return "-".to_string(),
+    };
+    if salary.is_estimate {
+        format!("{text}~")
+    } else {
+        text
     }
 }
 
@@ -116,5 +121,29 @@ pub fn job_label(job: &job_hunter_core::db::Job) -> String {
         (Some(t), Some(c)) => format!("{t} @ {c}"),
         (Some(t), None) => t.clone(),
         _ => format!("job #{}", job.id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use job_hunter_core::assessment::schema::AssessmentFacts;
+
+    #[test]
+    fn estimated_salary_is_marked() {
+        let mut facts = AssessmentFacts::default();
+        facts.extracted.salary.min = Some(90_000.0);
+        facts.extracted.salary.max = Some(110_000.0);
+        facts.extracted.salary.currency = Some("GBP".into());
+        assert_eq!(format_salary(&facts), "£90k-110k");
+
+        facts.extracted.salary.is_estimate = true;
+        assert_eq!(format_salary(&facts), "£90k-110k~");
+    }
+
+    #[test]
+    fn missing_salary_has_no_estimate_marker() {
+        let facts = AssessmentFacts::default();
+        assert_eq!(format_salary(&facts), "-");
     }
 }

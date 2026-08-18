@@ -82,6 +82,12 @@ pub fn run(id: i64) -> Result<()> {
             if let Some(notes) = &facts.fit.notes {
                 println!("  notes: {notes}");
             }
+            if !facts.fit.suggestions.is_empty() {
+                println!("  suggestions:");
+                for s in &facts.fit.suggestions {
+                    println!("    → {s}");
+                }
+            }
 
             println!("\n## Score: {:.1}/100  hard filters: {}",
                 score.score,

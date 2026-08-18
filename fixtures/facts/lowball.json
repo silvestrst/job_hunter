@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "extracted": {
     "job_title": "Rust Developer",
     "company": "Cheapskate GmbH",
@@ -24,6 +24,10 @@
     "overall_cv_match": 0.55,
     "red_flags": ["salary below market for the seniority"],
     "green_flags": [],
+    "suggestions": [
+      "Negotiate before onsite relocation costs - the offer is already below market.",
+      "Ask whether the level can be revisited given your seniority vs. their mid-level scope."
+    ],
     "notes": "Onsite abroad and under-levelled."
   },
   "confidence": {"salary": 0.9, "work_mode": 0.95, "overall": 0.8}
