@@ -6,6 +6,37 @@ use job_hunter_core::assessment::prompt;
 use job_hunter_core::assessment::schema::CURRENT_SCHEMA_VERSION;
 use job_hunter_core::db::{JobFilter, JobStatus};
 use job_hunter_core::{feedback, normalize_identity, paths::expand_tilde, sha256_hex};
+use std::io::Write;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// Prints a "." every `interval` while an agent call is in flight, so a single
+/// job that takes the full timeout doesn't look like the CLI has hung.
+struct Heartbeat {
+    stop_tx: mpsc::Sender<()>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl Heartbeat {
+    fn start(interval: Duration) -> Self {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || loop {
+            match stop_rx.recv_timeout(interval) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    print!(".");
+                    let _ = std::io::stdout().flush();
+                }
+                _ => break,
+            }
+        });
+        Self { stop_tx, handle }
+    }
+
+    fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.handle.join();
+    }
+}
 
 #[derive(Args)]
 pub struct AssessArgs {
@@ -100,23 +131,30 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     let feedback_digest_hash = feedback_digest.as_deref().map(|d| sha256_hex(d.as_bytes())[..16].to_string());
     let agent_command = ctx.config.agent.command.join(" ");
 
-    println!("Assessing {} job(s) with `{}`...\n", targets.len(), agent_command);
+    let total = targets.len();
+    println!("Assessing {total} job(s) with `{agent_command}`...\n");
+    let overall_start = Instant::now();
     let mut failures = 0usize;
-    for job in &targets {
+    for (i, job) in targets.iter().enumerate() {
         let assessment_prompt = prompt::build_assessment_prompt(
             &cv_prompt_text,
             feedback_digest.as_deref(),
             &job.content_text,
             ctx.config.assessment.max_job_chars,
         );
-        print!("job #{} ({})... ", job.id, job_label(job));
-        use std::io::Write;
+        print!("[{}/{total}] job #{} ({})... ", i + 1, job.id, job_label(job));
         std::io::stdout().flush().ok();
 
-        let (facts, facts_json) = match runner.run_facts(&assessment_prompt) {
+        let heartbeat = Heartbeat::start(Duration::from_secs(5));
+        let started = Instant::now();
+        let result = runner.run_facts(&assessment_prompt);
+        heartbeat.stop();
+        let elapsed = started.elapsed().as_secs_f64();
+
+        let (facts, facts_json) = match result {
             Ok(ok) => ok,
             Err(e) => {
-                println!("FAILED: {e:#}");
+                println!(" FAILED ({elapsed:.1}s): {e:#}");
                 failures += 1;
                 continue;
             }
@@ -156,9 +194,9 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
         match scored {
             Some((_, score)) => {
                 let mark = if score.hard_filter_passed { "✓" } else { "✗ filtered" };
-                print!("score {:.1} {mark}", score.score);
+                print!(" score {:.1} {mark} ({elapsed:.1}s)", score.score);
             }
-            None => print!("assessed"),
+            None => print!(" assessed ({elapsed:.1}s)"),
         }
         if let Some(dup) = duplicate_of {
             print!("  (duplicate of job #{dup})");
@@ -169,7 +207,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     if failures > 0 {
         bail!("{failures} of {} assessment(s) failed", targets.len());
     }
-    println!("\nDone. Run `job-hunter jobs` to see the ranking.");
+    println!("\nDone in {:.0}s. Run `job-hunter jobs` to see the ranking.", overall_start.elapsed().as_secs_f64());
     Ok(())
 }
 
