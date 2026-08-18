@@ -3,7 +3,7 @@
 //! identically regardless of source.
 
 use crate::db::Db;
-use crate::urlnorm;
+use crate::{cleaner, urlnorm};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
@@ -43,12 +43,14 @@ pub fn ingest_payload(db: &Db, payload: &ScrapedPayload) -> Result<IngestResult>
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty());
+    let text = payload.text.trim();
+    let content_text = cleaner::clean(&domain, text).unwrap_or_else(|| text.to_string());
     let (id, duplicate) = db.insert_job(
         payload.url.trim(),
         &url_normalized,
         &domain,
         title,
-        payload.text.trim(),
+        &content_text,
         payload.html.as_deref(),
         &payload.source,
     )?;
@@ -88,6 +90,36 @@ mod tests {
         .unwrap();
         assert!(second.duplicate);
         assert_eq!(first.id, second.id);
+    }
+
+    #[test]
+    fn linkedin_text_is_cleaned_before_storage() {
+        let db = Db::open_in_memory().unwrap();
+        let description = "You will design and operate low-latency trading systems in Rust, \
+            owning exchange connectivity and market data components end to end while \
+            collaborating with quants and traders across a fully remote global team.";
+        let page = format!(
+            "Home\nMy Network\nJobs\n\nKeyrock\n\nRust Engineer\n\n\
+             London · 3 weeks ago · 13 people clicked apply\n\nRemote\nApply\n\n\
+             About the job\n\n{description}\n\nSet alert for similar jobs\n\
+             LinkedIn Corporation © 2026\n"
+        );
+        let result = ingest_payload(
+            &db,
+            &ScrapedPayload {
+                url: "https://www.linkedin.com/jobs/view/12345/".into(),
+                title: Some("Rust Engineer".into()),
+                text: page,
+                html: None,
+                source: "extension".into(),
+            },
+        )
+        .unwrap();
+        let stored = db.get_job(result.id).unwrap().content_text;
+        assert!(stored.starts_with("Keyrock\n\nRust Engineer\n"));
+        assert!(stored.contains(description));
+        assert!(!stored.contains("My Network"));
+        assert!(!stored.contains("Set alert for similar jobs"));
     }
 
     #[test]

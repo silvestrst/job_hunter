@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod assessment;
+pub mod cleaner;
 pub mod config;
 pub mod db;
 pub mod feedback;
