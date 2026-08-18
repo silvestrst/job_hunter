@@ -40,6 +40,8 @@ pub fn run(id: i64) -> Result<()> {
         }
     }
 
+    println!("\n## Original posting\n{}", job.content_text);
+
     match ensure_score(&ctx, id, &criteria_hash)? {
         None => println!("\nNot assessed yet - run `job-hunter assess {id}`."),
         Some((assessment, score)) => {
