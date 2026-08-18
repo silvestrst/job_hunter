@@ -36,9 +36,16 @@ pub struct ResourcesConfig {
 pub struct AgentConfig {
     /// Argv template; run directly, never through a shell. If any element
     /// contains `{prompt}` it is substituted, otherwise the prompt is piped
-    /// to the child's stdin.
+    /// to the child's stdin. If any element contains `{model}` it is
+    /// substituted with `model` below.
     #[serde(default = "default_agent_command")]
     pub command: Vec<String>,
+    /// Explicit model id substituted into `{model}` in `command`. Required
+    /// iff `command` references `{model}` - see `Config::validate`. Without
+    /// this, the agent CLI falls back to whatever model it's configured to
+    /// use by default, which may not be the one you want to pay for.
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub output: AgentOutput,
     #[serde(default = "default_timeout_secs")]
@@ -141,7 +148,12 @@ fn default_agent_command() -> Vec<String> {
         "-p".into(),
         "--output-format".into(),
         "json".into(),
+        "--model".into(),
+        "{model}".into(),
     ]
+}
+fn default_agent_model() -> &'static str {
+    "claude-sonnet-5"
 }
 fn default_timeout_secs() -> u64 {
     180
@@ -174,6 +186,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             command: default_agent_command(),
+            model: Some(default_agent_model().into()),
             output: AgentOutput::default(),
             timeout_secs: default_timeout_secs(),
             retries: default_retries(),
@@ -207,6 +220,17 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.agent.command.is_empty() {
             bail!("agent.command must not be empty");
+        }
+        let references_model = self.agent.command.iter().any(|a| a.contains("{model}"));
+        match (references_model, &self.agent.model) {
+            (true, None) => {
+                bail!("agent.command references {{model}} but agent.model is not set")
+            }
+            (false, Some(_)) => bail!(
+                "agent.model is set but agent.command does not reference {{model}} - \
+                 add {{model}} to agent.command or remove agent.model"
+            ),
+            _ => {}
         }
         for f in &self.criteria.hard_filters {
             crate::scoring::FactRef::parse(&f.fact)
@@ -246,10 +270,15 @@ resources:
 agent:
   # LLM agent command as an argv array (no shell). If an element contains
   # "{prompt}" it is substituted; otherwise the prompt is piped to stdin.
+  # If an element contains "{model}" it is substituted with `model` below.
   # Swap in any other agent CLI, e.g.:
-  #   command: ["codex", "exec", "--quiet", "{prompt}"]
+  #   command: ["codex", "exec", "-m", "{model}", "--quiet", "{prompt}"]
   #   output: text
-  command: ["claude", "-p", "--output-format", "json"]
+  command: ["claude", "-p", "--output-format", "json", "--model", "{model}"]
+  # Pin the model explicitly. Without this, the CLI falls back to whatever
+  # model it's configured to use by default - which may not be the one you
+  # want to pay for. Required iff command references "{model}" above.
+  model: claude-sonnet-5
   output: claude_json              # claude_json = unwrap Claude's JSON envelope; text = stdout as-is
   timeout_secs: 180
   retries: 2
@@ -291,7 +320,38 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.server.port, 7877);
         assert_eq!(config.agent.output, AgentOutput::ClaudeJson);
+        assert_eq!(config.agent.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(config.criteria.hard_filters.len(), 2);
+    }
+
+    #[test]
+    fn omitted_agent_section_defaults_to_pinned_model() {
+        let config: Config = serde_yaml::from_str(
+            "resources:\n  cv_path: ~/cv.md\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.agent.model.as_deref(), Some("claude-sonnet-5"));
+        assert!(config.agent.command.iter().any(|a| a.contains("{model}")));
+    }
+
+    #[test]
+    fn rejects_model_placeholder_without_model() {
+        let bad = DEFAULT_CONFIG_YAML.replace("  model: claude-sonnet-5\n", "");
+        let config: Config = serde_yaml::from_str(&bad).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(format!("{err:#}").contains("agent.model is not set"));
+    }
+
+    #[test]
+    fn rejects_model_without_placeholder() {
+        let bad = DEFAULT_CONFIG_YAML.replace(
+            r#"command: ["claude", "-p", "--output-format", "json", "--model", "{model}"]"#,
+            r#"command: ["claude", "-p", "--output-format", "json"]"#,
+        );
+        let config: Config = serde_yaml::from_str(&bad).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(format!("{err:#}").contains("does not reference {model}"));
     }
 
     #[test]

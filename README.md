@@ -151,10 +151,16 @@ resources:
   cv_path: ~/cv.md            # your CV as markdown/plain text (~ expands)
 
 agent:                        # LLM-agnostic invocation
-  command: ["claude", "-p", "--output-format", "json"]
+  command: ["claude", "-p", "--output-format", "json", "--model", "{model}"]
                               # argv array, run directly (no shell).
                               # An element containing {prompt} gets substituted;
                               # otherwise the prompt is piped to stdin.
+                              # An element containing {model} is substituted with
+                              # `model` below.
+  model: claude-sonnet-5      # pinned explicitly - required iff command references
+                              # {model}. Without this, the CLI falls back to
+                              # whatever model it's configured to use by default,
+                              # which may not be the one you want to pay for.
   output: claude_json         # claude_json = unwrap Claude's JSON envelope (.result)
                               # text        = stdout is the answer itself
   timeout_secs: 180           # kill the agent after this long
@@ -206,12 +212,15 @@ output is retried with the validation error appended.
 ```yaml
 # Codex CLI instead of Claude Code:
 agent:
-  command: ["codex", "exec", "--quiet", "{prompt}"]
+  command: ["codex", "exec", "-m", "{model}", "--quiet", "{prompt}"]
+  model: gpt-5-codex
   output: text
 ```
 
 Anything works, including a shell script of your own — the test suite runs entirely
-against `fixtures/mock-agent.sh`.
+against `fixtures/mock-agent.sh`. `model` and the `{model}` placeholder are optional but
+tied together: `config check` (and `Config::validate`) rejects one without the other, so
+there's no way to end up silently running whatever model the CLI defaults to.
 
 ## Token economics
 
@@ -221,8 +230,9 @@ against `fixtures/mock-agent.sh`.
 | CV distillation (once, only if CV > `cv_verbatim_max_chars`) | any criteria edit + re-rank |
 | `feedback --compact` (deliberate, manual) | recording feedback, status changes |
 
-Levers: `max_job_chars` bounds the biggest prompt section; `cv_verbatim_max_chars` /
-`cv_digest_max_words` bound the CV section; `feedback_recent_n` bounds the feedback
+Levers: `agent.model` is the biggest one - pick the cheapest model that still extracts
+facts reliably; `max_job_chars` bounds the biggest prompt section; `cv_verbatim_max_chars`
+/ `cv_digest_max_words` bound the CV section; `feedback_recent_n` bounds the feedback
 section; the single-pass design does extraction *and* fit in one call; duplicates are
 skipped by `assess`.
 

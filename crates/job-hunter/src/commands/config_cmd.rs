@@ -46,7 +46,17 @@ pub fn check() -> Result<()> {
         Err(e) => println!("cv:       {} - NOT READABLE: {e}", cv_path.display()),
     }
 
-    println!("agent:    {} (output: {:?})", config.agent.command.join(" "), config.agent.output);
+    let resolved_command: Vec<String> = config
+        .agent
+        .command
+        .iter()
+        .map(|arg| match &config.agent.model {
+            Some(model) => arg.replace("{model}", model),
+            None => arg.clone(),
+        })
+        .collect();
+    println!("agent:    {} (output: {:?})", resolved_command.join(" "), config.agent.output);
+    println!("model:    {}", config.agent.model.as_deref().unwrap_or("(none - using agent CLI's own default)"));
     println!("server:   http://127.0.0.1:{}", config.server.port);
     match token::load(&paths.api_token_file)? {
         Some(t) => println!("token:    {t}"),

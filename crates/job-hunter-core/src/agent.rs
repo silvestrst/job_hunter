@@ -67,6 +67,13 @@ impl<'a> AgentRunner<'a> {
                 used_placeholder = true;
             }
         }
+        if let Some(model) = &self.config.model {
+            for arg in &mut argv {
+                if arg.contains("{model}") {
+                    *arg = arg.replace("{model}", model);
+                }
+            }
+        }
         let program = argv.first().context("agent.command is empty")?.clone();
 
         let mut cmd = Command::new(&program);
@@ -204,6 +211,7 @@ mod tests {
     fn shell_agent(script: &str, output: AgentOutput) -> AgentConfig {
         AgentConfig {
             command: vec!["sh".into(), "-c".into(), script.into()],
+            model: None,
             output,
             timeout_secs: 10,
             retries: 1,
@@ -222,12 +230,26 @@ mod tests {
     fn substitutes_prompt_placeholder() {
         let config = AgentConfig {
             command: vec!["printf".into(), "%s".into(), "got:{prompt}".into()],
+            model: None,
             output: AgentOutput::Text,
             timeout_secs: 10,
             retries: 0,
         };
         let out = AgentRunner::new(&config).run_text("X").unwrap();
         assert_eq!(out, "got:X");
+    }
+
+    #[test]
+    fn substitutes_model_placeholder() {
+        let config = AgentConfig {
+            command: vec!["printf".into(), "%s".into(), "model={model} prompt={prompt}".into()],
+            model: Some("claude-sonnet-5".into()),
+            output: AgentOutput::Text,
+            timeout_secs: 10,
+            retries: 0,
+        };
+        let out = AgentRunner::new(&config).run_text("X").unwrap();
+        assert_eq!(out, "model=claude-sonnet-5 prompt=X");
     }
 
     #[test]
