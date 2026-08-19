@@ -73,6 +73,8 @@ pub struct Assessment {
     pub prompt_version: i64,
     pub schema_version: i64,
     pub instructions_hash: Option<String>,
+    /// None when no supplementary profile documents were configured.
+    pub profile_hash: Option<String>,
     pub facts_json: String,
     pub created_at: String,
 }
@@ -81,6 +83,61 @@ impl Assessment {
     pub fn facts(&self) -> Result<crate::assessment::schema::AssessmentFacts> {
         serde_json::from_str(&self.facts_json).context("stored facts_json no longer parses")
     }
+}
+
+/// Everything an assessment row records. A struct rather than nine
+/// positional arguments because four of them are interchangeable strings.
+#[derive(Debug, Clone)]
+pub struct NewAssessment<'a> {
+    pub job_id: i64,
+    pub cv_hash: &'a str,
+    pub profile_hash: Option<&'a str>,
+    pub prompt_version: i64,
+    pub schema_version: i64,
+    pub feedback_digest_hash: Option<&'a str>,
+    pub instructions_hash: Option<&'a str>,
+    pub agent_command: &'a str,
+    pub facts_json: &'a str,
+}
+
+/// What makes a stored assessment current: everything it was derived from
+/// besides the posting itself.
+#[derive(Debug, Clone)]
+pub struct AssessmentKey<'a> {
+    pub cv_hash: &'a str,
+    pub profile_hash: Option<&'a str>,
+    pub prompt_version: i64,
+    pub instructions_hash: &'a str,
+}
+
+/// CV restructuring advice for one job, derived from one assessment.
+#[derive(Debug, Clone)]
+pub struct CvAdviceRow {
+    pub id: i64,
+    pub job_id: i64,
+    pub assessment_id: i64,
+    pub schema_version: i64,
+    pub profile_hash: Option<String>,
+    pub instructions_hash: Option<String>,
+    pub advice_json: String,
+    pub created_at: String,
+}
+
+impl CvAdviceRow {
+    pub fn advice(&self) -> Result<crate::advice::schema::CvAdvice> {
+        serde_json::from_str(&self.advice_json).context("stored advice_json no longer parses")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewCvAdvice<'a> {
+    pub job_id: i64,
+    pub assessment_id: i64,
+    pub schema_version: i64,
+    pub profile_hash: Option<&'a str>,
+    pub instructions_hash: Option<&'a str>,
+    pub agent_command: &'a str,
+    pub advice_json: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -331,26 +388,17 @@ impl Db {
     // ---- assessments ------------------------------------------------------
 
     /// Insert or replace the assessment for (job, cv_hash, prompt_version).
-    /// Any cached scores for a replaced assessment are dropped since the facts
-    /// changed.
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_assessment(
-        &self,
-        job_id: i64,
-        cv_hash: &str,
-        prompt_version: i64,
-        schema_version: i64,
-        feedback_digest_hash: Option<&str>,
-        instructions_hash: Option<&str>,
-        agent_command: &str,
-        facts_json: &str,
-    ) -> Result<i64> {
+    /// Replacing the facts drops everything derived from them - cached scores
+    /// and any CV advice - rather than leaving stale conclusions attached to
+    /// new facts.
+    pub fn upsert_assessment(&self, a: &NewAssessment) -> Result<i64> {
         let id: i64 = self.conn.query_row(
-            "INSERT INTO assessments (job_id, cv_hash, prompt_version, schema_version,
+            "INSERT INTO assessments (job_id, cv_hash, profile_hash, prompt_version, schema_version,
                                       feedback_digest_hash, instructions_hash, agent_command,
                                       facts_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(job_id, cv_hash, prompt_version) DO UPDATE SET
+                profile_hash = excluded.profile_hash,
                 schema_version = excluded.schema_version,
                 feedback_digest_hash = excluded.feedback_digest_hash,
                 instructions_hash = excluded.instructions_hash,
@@ -358,11 +406,14 @@ impl Db {
                 facts_json = excluded.facts_json,
                 created_at = excluded.created_at
              RETURNING id",
-            params![job_id, cv_hash, prompt_version, schema_version, feedback_digest_hash, instructions_hash, agent_command, facts_json, now_utc()],
+            params![a.job_id, a.cv_hash, a.profile_hash, a.prompt_version, a.schema_version,
+                    a.feedback_digest_hash, a.instructions_hash, a.agent_command, a.facts_json, now_utc()],
             |r| r.get(0),
         )?;
         self.conn
             .execute("DELETE FROM scores WHERE assessment_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM cv_advice WHERE assessment_id = ?1", [id])?;
         Ok(id)
     }
 
@@ -373,7 +424,7 @@ impl Db {
             .conn
             .query_row(
                 "SELECT id, job_id, cv_hash, prompt_version, schema_version, instructions_hash,
-                        facts_json, created_at
+                        profile_hash, facts_json, created_at
                  FROM assessments WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
                 [job_id],
                 |r| {
@@ -384,8 +435,9 @@ impl Db {
                         prompt_version: r.get(3)?,
                         schema_version: r.get(4)?,
                         instructions_hash: r.get(5)?,
-                        facts_json: r.get(6)?,
-                        created_at: r.get(7)?,
+                        profile_hash: r.get(6)?,
+                        facts_json: r.get(7)?,
+                        created_at: r.get(8)?,
                     })
                 },
             )
@@ -394,25 +446,74 @@ impl Db {
 
     /// Whether a current assessment exists. Rows with a NULL
     /// instructions_hash predate the agent workspace and are grandfathered as
-    /// matching, so upgrading never silently re-spends tokens.
-    pub fn assessment_exists(
-        &self,
-        job_id: i64,
-        cv_hash: &str,
-        prompt_version: i64,
-        instructions_hash: &str,
-    ) -> Result<bool> {
+    /// matching, so upgrading never silently re-spends tokens. profile_hash
+    /// needs no such carve-out: it is compared NULL-safely with `IS`, so a row
+    /// written before the supplements existed matches a profile that still has
+    /// none - and stops matching the moment one is added, which is a
+    /// deliberate act like editing the CV, not an upgrade.
+    pub fn assessment_exists(&self, job_id: i64, key: &AssessmentKey) -> Result<bool> {
         let found: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM assessments
                  WHERE job_id = ?1 AND cv_hash = ?2 AND prompt_version = ?3
-                   AND (instructions_hash IS NULL OR instructions_hash = ?4)",
-                params![job_id, cv_hash, prompt_version, instructions_hash],
+                   AND (instructions_hash IS NULL OR instructions_hash = ?4)
+                   AND profile_hash IS ?5",
+                params![job_id, key.cv_hash, key.prompt_version, key.instructions_hash, key.profile_hash],
                 |r| r.get(0),
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    // ---- CV advice --------------------------------------------------------
+
+    /// Insert or replace this assessment's CV advice.
+    pub fn upsert_cv_advice(&self, a: &NewCvAdvice) -> Result<i64> {
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO cv_advice (job_id, assessment_id, schema_version, profile_hash,
+                                    instructions_hash, agent_command, advice_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(assessment_id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                profile_hash = excluded.profile_hash,
+                instructions_hash = excluded.instructions_hash,
+                agent_command = excluded.agent_command,
+                advice_json = excluded.advice_json,
+                created_at = excluded.created_at
+             RETURNING id",
+            params![a.job_id, a.assessment_id, a.schema_version, a.profile_hash,
+                    a.instructions_hash, a.agent_command, a.advice_json, now_utc()],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// The advice derived from this assessment, if any. Keyed by assessment
+    /// rather than job so advice can never be shown against facts it wasn't
+    /// derived from.
+    pub fn cv_advice_for_assessment(&self, assessment_id: i64) -> Result<Option<CvAdviceRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, job_id, assessment_id, schema_version, profile_hash,
+                        instructions_hash, advice_json, created_at
+                 FROM cv_advice WHERE assessment_id = ?1",
+                [assessment_id],
+                |r| {
+                    Ok(CvAdviceRow {
+                        id: r.get(0)?,
+                        job_id: r.get(1)?,
+                        assessment_id: r.get(2)?,
+                        schema_version: r.get(3)?,
+                        profile_hash: r.get(4)?,
+                        instructions_hash: r.get(5)?,
+                        advice_json: r.get(6)?,
+                        created_at: r.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     // ---- scores -----------------------------------------------------------
@@ -612,20 +713,57 @@ mod tests {
         assert_eq!(events[0].note.as_deref(), Some("sent CV"));
     }
 
+    fn assessment<'a>(
+        cv_hash: &'a str,
+        instructions: Option<&'a str>,
+        facts: &'a str,
+    ) -> NewAssessment<'a> {
+        NewAssessment {
+            job_id: 1,
+            cv_hash,
+            profile_hash: None,
+            prompt_version: 1,
+            schema_version: 1,
+            feedback_digest_hash: None,
+            instructions_hash: instructions,
+            agent_command: "mock",
+            facts_json: facts,
+        }
+    }
+
+    fn key<'a>(cv_hash: &'a str, instructions: &'a str) -> AssessmentKey<'a> {
+        AssessmentKey { cv_hash, profile_hash: None, prompt_version: 1, instructions_hash: instructions }
+    }
+
     #[test]
-    fn assessment_upsert_replaces_and_drops_scores() {
+    fn assessment_upsert_replaces_and_drops_derived_rows() {
         let db = seeded_db();
         let a1 = db
-            .upsert_assessment(1, "cv1", 1, 1, None, Some("aaaa"), "mock", r#"{"schema_version":1}"#)
+            .upsert_assessment(&assessment("cv1", Some("aaaa"), r#"{"schema_version":1}"#))
             .unwrap();
         db.upsert_score(1, a1, "crit1", 80.0, true, "[]").unwrap();
+        db.upsert_cv_advice(&NewCvAdvice {
+            job_id: 1,
+            assessment_id: a1,
+            schema_version: 1,
+            profile_hash: None,
+            instructions_hash: Some("aaaa"),
+            agent_command: "mock",
+            advice_json: r#"{"positioning":"lead with rust"}"#,
+        })
+        .unwrap();
         assert!(db.get_score(a1, "crit1").unwrap().is_some());
+        assert!(db.cv_advice_for_assessment(a1).unwrap().is_some());
 
         let a2 = db
-            .upsert_assessment(1, "cv1", 1, 1, None, Some("bbbb"), "mock", r#"{"schema_version":2}"#)
+            .upsert_assessment(&assessment("cv1", Some("bbbb"), r#"{"schema_version":2}"#))
             .unwrap();
         assert_eq!(a1, a2);
         assert!(db.get_score(a2, "crit1").unwrap().is_none());
+        assert!(
+            db.cv_advice_for_assessment(a2).unwrap().is_none(),
+            "advice derived from replaced facts must not survive them"
+        );
 
         let latest = db.latest_assessment(1).unwrap().unwrap();
         assert!(latest.facts_json.contains("\"schema_version\":2"));
@@ -635,13 +773,78 @@ mod tests {
     #[test]
     fn assessment_exists_keys_on_instructions_hash() {
         let db = seeded_db();
-        db.upsert_assessment(1, "cv1", 1, 1, None, Some("aaaa"), "mock", "{}").unwrap();
-        assert!(db.assessment_exists(1, "cv1", 1, "aaaa").unwrap());
-        assert!(!db.assessment_exists(1, "cv1", 1, "bbbb").unwrap(), "instruction edits re-run");
+        db.upsert_assessment(&assessment("cv1", Some("aaaa"), "{}")).unwrap();
+        assert!(db.assessment_exists(1, &key("cv1", "aaaa")).unwrap());
+        assert!(!db.assessment_exists(1, &key("cv1", "bbbb")).unwrap(), "instruction edits re-run");
 
         // NULL hash = pre-workspace row, grandfathered under any hash.
-        db.upsert_assessment(1, "cv2", 1, 1, None, None, "mock", "{}").unwrap();
-        assert!(db.assessment_exists(1, "cv2", 1, "anything").unwrap());
+        db.upsert_assessment(&assessment("cv2", None, "{}")).unwrap();
+        assert!(db.assessment_exists(1, &key("cv2", "anything")).unwrap());
+    }
+
+    #[test]
+    fn assessment_exists_keys_on_profile_hash() {
+        let db = seeded_db();
+        // Written with no supplements: still current while there are none.
+        db.upsert_assessment(&assessment("cv1", Some("aaaa"), "{}")).unwrap();
+        assert!(db.assessment_exists(1, &key("cv1", "aaaa")).unwrap());
+
+        // Adding a supplement is a deliberate act, like editing the CV.
+        let with_profile =
+            AssessmentKey { profile_hash: Some("p1"), ..key("cv1", "aaaa") };
+        assert!(!db.assessment_exists(1, &with_profile).unwrap());
+
+        db.upsert_assessment(&NewAssessment { profile_hash: Some("p1"), ..assessment("cv1", Some("aaaa"), "{}") })
+            .unwrap();
+        assert!(db.assessment_exists(1, &with_profile).unwrap());
+        assert!(
+            !db.assessment_exists(1, &AssessmentKey { profile_hash: Some("p2"), ..with_profile.clone() }).unwrap(),
+            "editing a supplement re-runs"
+        );
+        assert!(!db.assessment_exists(1, &key("cv1", "aaaa")).unwrap(), "removing them re-runs too");
+    }
+
+    #[test]
+    fn cv_advice_round_trips_and_is_keyed_by_assessment() {
+        let db = seeded_db();
+        let a = db.upsert_assessment(&assessment("cv1", Some("aaaa"), "{}")).unwrap();
+        let new = NewCvAdvice {
+            job_id: 1,
+            assessment_id: a,
+            schema_version: 1,
+            profile_hash: Some("p1"),
+            instructions_hash: Some("iiii"),
+            agent_command: "mock",
+            advice_json: r#"{"positioning":"first take"}"#,
+        };
+        let first = db.upsert_cv_advice(&new).unwrap();
+        let second = db
+            .upsert_cv_advice(&NewCvAdvice { advice_json: r#"{"positioning":"second take"}"#, ..new })
+            .unwrap();
+        assert_eq!(first, second, "one advice row per assessment");
+
+        let row = db.cv_advice_for_assessment(a).unwrap().unwrap();
+        assert_eq!(row.profile_hash.as_deref(), Some("p1"));
+        assert_eq!(row.advice().unwrap().positioning.as_deref(), Some("second take"));
+        assert!(db.cv_advice_for_assessment(a + 999).unwrap().is_none());
+    }
+
+    #[test]
+    fn deleting_a_job_cascades_to_its_advice() {
+        let db = seeded_db();
+        let a = db.upsert_assessment(&assessment("cv1", Some("aaaa"), "{}")).unwrap();
+        db.upsert_cv_advice(&NewCvAdvice {
+            job_id: 1,
+            assessment_id: a,
+            schema_version: 1,
+            profile_hash: None,
+            instructions_hash: None,
+            agent_command: "mock",
+            advice_json: "{}",
+        })
+        .unwrap();
+        db.delete_job(1).unwrap();
+        assert!(db.cv_advice_for_assessment(a).unwrap().is_none());
     }
 
     #[test]

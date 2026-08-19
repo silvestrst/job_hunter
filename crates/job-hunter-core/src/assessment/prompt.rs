@@ -6,6 +6,7 @@
 //! contract, and the data. The instruction prose lives in the agent
 //! workspace (see `crate::workspace`), which the agent runs inside.
 
+use crate::profile::ProfilePrompt;
 use crate::workspace::AgentTask;
 
 /// The JSON contract shown to the agent. Kept as one literal so the schema the
@@ -48,7 +49,7 @@ const FACTS_CONTRACT: &str = r#"{
 }"#;
 
 pub fn build_assessment_prompt(
-    cv_text: &str,
+    profile: &ProfilePrompt,
     feedback_digest: Option<&str>,
     job_text: &str,
     max_job_chars: usize,
@@ -60,6 +61,8 @@ pub fn build_assessment_prompt(
         ),
         _ => String::new(),
     };
+    let profile_sections = profile.sections();
+    let cv_text = &profile.cv_text;
     let pointer = AgentTask::Assess.instructions_pointer();
     format!(
         "Task: assess the job posting below against the candidate's CV.\n\
@@ -67,7 +70,8 @@ pub fn build_assessment_prompt(
          Return ONLY a single JSON object matching this contract - no prose, no markdown fences:\n\
          {FACTS_CONTRACT}\n\
          {feedback_section}\n\
-         ## Candidate CV\n{cv_text}\n\n\
+         ## Candidate CV\n{cv_text}\n\
+         {profile_sections}\n\
          ## Job posting\n{job}\n"
     )
 }
@@ -95,9 +99,13 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    fn cv_only(cv_text: &str) -> ProfilePrompt {
+        ProfilePrompt { cv_text: cv_text.into(), background: None, preferences: None }
+    }
+
     #[test]
     fn prompt_contains_pointer_contract_and_data() {
-        let p = build_assessment_prompt("MY CV", Some("- avoid agencies"), "JOB TEXT", 100);
+        let p = build_assessment_prompt(&cv_only("MY CV"), Some("- avoid agencies"), "JOB TEXT", 100);
         // Both forms of the pointer: the name a skill-aware agent resolves,
         // and the path any agent with a read tool can follow.
         assert!(p.contains("`assess` skill"));
@@ -113,7 +121,7 @@ mod tests {
     fn instruction_prose_lives_in_the_workspace_not_the_prompt() {
         // The hard rules ship in the assess skill (pinned by workspace.rs
         // tests); the prompt itself carries only the pointer.
-        let p = build_assessment_prompt("CV", None, "JOB", 100);
+        let p = build_assessment_prompt(&cv_only("CV"), None, "JOB", 100);
         assert!(!p.contains("Hard rules"));
         assert!(!p.contains("never collapse a stated range"));
     }
@@ -129,8 +137,31 @@ mod tests {
 
     #[test]
     fn feedback_section_omitted_when_empty() {
-        let p = build_assessment_prompt("CV", None, "JOB", 100);
+        let p = build_assessment_prompt(&cv_only("CV"), None, "JOB", 100);
         assert!(!p.contains("past feedback"));
+    }
+
+    #[test]
+    fn supplementary_profile_documents_ride_along() {
+        let profile = ProfilePrompt {
+            cv_text: "MY CV".into(),
+            background: Some("ran the payments rewrite".into()),
+            preferences: Some("remote only, no on-call".into()),
+        };
+        let p = build_assessment_prompt(&profile, None, "JOB", 100);
+        assert!(p.contains("## Additional background"));
+        assert!(p.contains("ran the payments rewrite"));
+        assert!(p.contains("## What the candidate wants from a role"));
+        assert!(p.contains("no on-call"));
+        // Order matters: the profile is complete before the posting appears.
+        assert!(p.find("ran the payments rewrite") < p.find("## Job posting"));
+    }
+
+    #[test]
+    fn no_supplements_means_no_empty_headings() {
+        let p = build_assessment_prompt(&cv_only("MY CV"), None, "JOB", 100);
+        assert!(!p.contains("## Additional background"));
+        assert!(!p.contains("wants from a role"));
     }
 
     #[test]

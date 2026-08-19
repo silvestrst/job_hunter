@@ -29,6 +29,17 @@ pub struct ServerConfig {
 pub struct ResourcesConfig {
     /// Path to the CV as markdown/plain text (`~/` is expanded).
     pub cv_path: String,
+    /// Optional: detail on experience and skills the CV has no room for -
+    /// project scope, depth, context. Read as further evidence about the
+    /// candidate, exactly like the CV itself.
+    #[serde(default)]
+    pub background_path: Option<String>,
+    /// Optional: what the candidate wants from a role, in their own words.
+    /// Deliberately advisory - it shapes the agent's prose (flags, notes,
+    /// suggestions) but never the extracted facts or the fit numbers, because
+    /// hard preferences belong in `criteria`, which is scored without an LLM.
+    #[serde(default)]
+    pub preferences_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +94,9 @@ pub struct AssessmentConfig {
     /// Word budget for the one-off distillation of a CV over the verbatim limit.
     #[serde(default = "default_cv_digest_max_words")]
     pub cv_digest_max_words: usize,
+    /// Budget for each supplementary profile document in a prompt.
+    #[serde(default = "default_max_profile_chars")]
+    pub max_profile_chars: usize,
     #[serde(default = "default_feedback_recent_n")]
     pub feedback_recent_n: usize,
 }
@@ -179,6 +193,9 @@ fn default_cv_verbatim_max_chars() -> usize {
 fn default_cv_digest_max_words() -> usize {
     800
 }
+fn default_max_profile_chars() -> usize {
+    6_000
+}
 fn default_feedback_recent_n() -> usize {
     10
 }
@@ -207,6 +224,7 @@ impl Default for AssessmentConfig {
             max_job_chars: default_max_job_chars(),
             cv_verbatim_max_chars: default_cv_verbatim_max_chars(),
             cv_digest_max_words: default_cv_digest_max_words(),
+            max_profile_chars: default_max_profile_chars(),
             feedback_recent_n: default_feedback_recent_n(),
         }
     }
@@ -273,6 +291,16 @@ server:
 resources:
   # Your CV as markdown or plain text (export it once from your source doc).
   cv_path: ~/Documents/cv.md
+  # Optional extras, also markdown/plain text. Both travel with every
+  # assessment and are the raw material for `job-hunter cv-advice`.
+  # Depth the CV has no room for - project scope, context, skills detail.
+  # Read as further evidence about you, exactly like the CV itself:
+  # background_path: ~/Documents/background.md
+  # What you want from your next role, in your own words. Advisory only: it
+  # shapes the agent's flags, notes and suggestions, never the extracted
+  # facts or the fit numbers. Hard preferences belong in `criteria` below,
+  # which is scored without an LLM:
+  # preferences_path: ~/Documents/preferences.md
 
 agent:
   # LLM agent command as an argv array (no shell). If an element contains
@@ -300,6 +328,7 @@ assessment:
   max_job_chars: 12000             # job text is truncated beyond this
   cv_verbatim_max_chars: 6000      # CV at or under this is embedded verbatim (lossless)
   cv_digest_max_words: 800         # word budget when a longer CV is distilled once
+  max_profile_chars: 6000          # background/preferences docs truncated beyond this
   feedback_recent_n: 10            # recent feedback items included in prompts
 
 criteria:
@@ -345,6 +374,21 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.agent.model.as_deref(), Some("claude-sonnet-5"));
         assert!(config.agent.command.iter().any(|a| a.contains("{model}")));
+    }
+
+    #[test]
+    fn supplementary_profile_paths_are_optional() {
+        let config: Config = serde_yaml::from_str(DEFAULT_CONFIG_YAML).unwrap();
+        assert!(config.resources.background_path.is_none());
+        assert!(config.resources.preferences_path.is_none());
+
+        let yaml = DEFAULT_CONFIG_YAML
+            .replace("  # background_path: ~/Documents/background.md", "  background_path: ~/bg.md")
+            .replace("  # preferences_path: ~/Documents/preferences.md", "  preferences_path: ~/want.md");
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.resources.background_path.as_deref(), Some("~/bg.md"));
+        assert_eq!(config.resources.preferences_path.as_deref(), Some("~/want.md"));
     }
 
     #[test]

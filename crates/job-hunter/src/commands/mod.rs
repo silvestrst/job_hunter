@@ -1,5 +1,6 @@
 pub mod assess;
 pub mod config_cmd;
+pub mod cv_advice;
 pub mod delete;
 pub mod feedback_cmd;
 pub mod jobs;
@@ -8,6 +9,8 @@ pub mod serve_cmd;
 pub mod service;
 pub mod show;
 pub mod status_cmd;
+#[cfg(test)]
+pub mod test_support;
 
 use anyhow::{Context, Result};
 use job_hunter_core::config::Config;
@@ -15,6 +18,9 @@ use job_hunter_core::db::{Assessment, Db, Score};
 use job_hunter_core::paths::Paths;
 use job_hunter_core::scoring;
 use job_hunter_core::workspace::AgentWorkspace;
+use std::io::Write;
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Everything a command needs: resolved paths, parsed config, open database.
 pub struct Ctx {
@@ -43,6 +49,34 @@ impl Ctx {
         let dir = AgentWorkspace::resolve_dir(&self.config.agent, &self.paths);
         let (ws, _created) = AgentWorkspace::ensure(dir)?;
         Ok(ws)
+    }
+}
+
+/// Prints a "." every `interval` while an agent call is in flight, so a single
+/// job that takes the full timeout doesn't look like the CLI has hung.
+pub struct Heartbeat {
+    stop_tx: mpsc::Sender<()>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl Heartbeat {
+    pub fn start(interval: Duration) -> Self {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || loop {
+            match stop_rx.recv_timeout(interval) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    print!(".");
+                    let _ = std::io::stdout().flush();
+                }
+                _ => break,
+            }
+        });
+        Self { stop_tx, handle }
+    }
+
+    pub fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.handle.join();
     }
 }
 

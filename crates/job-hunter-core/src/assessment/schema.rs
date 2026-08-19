@@ -230,6 +230,12 @@ impl AssessmentFacts {
     }
 }
 
+impl crate::agent::AgentJson for AssessmentFacts {
+    fn check(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

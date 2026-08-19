@@ -2,7 +2,6 @@
 //! prompt via `{prompt}` substitution or stdin, unwrap the configured output
 //! shape, then defensively extract/validate the facts JSON with retries.
 
-use crate::assessment::schema::AssessmentFacts;
 use crate::config::{AgentConfig, AgentOutput};
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
@@ -10,6 +9,13 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
+
+/// JSON an agent is asked to return. The runner parses it, calls `check`, and
+/// on failure re-asks with the error appended - so a task defines its own
+/// notion of "usable answer" without the runner knowing the shape.
+pub trait AgentJson: serde::de::DeserializeOwned {
+    fn check(&self) -> Result<()>;
+}
 
 pub struct AgentRunner<'a> {
     config: &'a AgentConfig,
@@ -35,10 +41,10 @@ impl<'a> AgentRunner<'a> {
         Ok(self.unwrap_output(&stdout)?.trim().to_string())
     }
 
-    /// Run the agent expecting facts JSON, retrying with a corrective note on
-    /// parse/validation failure. Returns the typed facts plus the exact JSON
-    /// stored in the database.
-    pub fn run_facts(&self, base_prompt: &str) -> Result<(AssessmentFacts, String)> {
+    /// Run the agent expecting JSON of type `T`, retrying with a corrective
+    /// note on parse/validation failure. Returns the typed value plus the
+    /// exact JSON to store in the database.
+    pub fn run_json<T: AgentJson>(&self, base_prompt: &str) -> Result<(T, String)> {
         let attempts = self.config.retries + 1;
         let mut last_err: Option<anyhow::Error> = None;
         for _ in 0..attempts {
@@ -49,7 +55,7 @@ impl<'a> AgentRunner<'a> {
                      Return only the corrected JSON object."
                 ),
             };
-            match self.try_facts(&prompt) {
+            match self.try_json::<T>(&prompt) {
                 Ok(ok) => return Ok(ok),
                 Err(e) => last_err = Some(e),
             }
@@ -58,13 +64,13 @@ impl<'a> AgentRunner<'a> {
             .with_context(|| format!("agent failed after {attempts} attempt(s)"))
     }
 
-    fn try_facts(&self, prompt: &str) -> Result<(AssessmentFacts, String)> {
+    fn try_json<T: AgentJson>(&self, prompt: &str) -> Result<(T, String)> {
         let answer = self.run_text(prompt)?;
         let json = extract_json_block(&answer)?;
-        let facts: AssessmentFacts =
-            serde_json::from_str(json).context("agent JSON does not match the facts schema")?;
-        facts.validate()?;
-        Ok((facts, json.to_string()))
+        let value: T =
+            serde_json::from_str(json).context("agent JSON does not match the expected schema")?;
+        value.check()?;
+        Ok((value, json.to_string()))
     }
 
     fn exec(&self, prompt: &str) -> Result<String> {
@@ -206,6 +212,7 @@ pub fn extract_json_block(text: &str) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assessment::schema::AssessmentFacts;
     use crate::config::AgentConfig;
 
     #[test]
@@ -298,7 +305,7 @@ mod tests {
             r#"printf '%s' '{"type":"result","is_error":false,"result":"{\"schema_version\":1}"}'"#,
             AgentOutput::ClaudeJson,
         );
-        let (facts, json) = AgentRunner::new(&config).run_facts("p").unwrap();
+        let (facts, json) = AgentRunner::new(&config).run_json::<AssessmentFacts>("p").unwrap();
         assert_eq!(facts.schema_version, 1);
         assert_eq!(json, "{\"schema_version\":1}");
     }

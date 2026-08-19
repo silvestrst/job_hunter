@@ -25,6 +25,8 @@ enum Command {
     },
     /// Run the LLM assessment for jobs that don't have one yet
     Assess(commands::assess::AssessArgs),
+    /// Suggest how to restructure your CV for specific jobs (LLM; needs an assessment)
+    CvAdvice(commands::cv_advice::CvAdviceArgs),
     /// Recompute all layer-2 scores for the current criteria (no LLM, instant)
     Rescore,
     /// Record feedback on assessments, list it, or compact it into guidance
@@ -67,6 +69,7 @@ fn main() {
         Command::Show { id } => commands::show::run(id),
         Command::Status { id, status, note } => commands::status_cmd::run(id, &status, note.as_deref()),
         Command::Assess(args) => commands::assess::run(args),
+        Command::CvAdvice(args) => commands::cv_advice::run(args),
         Command::Rescore => commands::rescore::run(),
         Command::Feedback(args) => commands::feedback_cmd::run(args),
         Command::Serve { port } => commands::serve_cmd::run(port),

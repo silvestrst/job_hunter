@@ -15,6 +15,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTask {
     Assess,
+    CvAdvice,
     CvDigest,
     FeedbackCompact,
 }
@@ -23,6 +24,7 @@ impl AgentTask {
     pub fn skill_name(&self) -> &'static str {
         match self {
             AgentTask::Assess => "assess",
+            AgentTask::CvAdvice => "cv-advice",
             AgentTask::CvDigest => "cv-digest",
             AgentTask::FeedbackCompact => "feedback-compact",
         }
@@ -56,6 +58,10 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
     (
         ".claude/skills/assess/SKILL.md",
         include_str!("../assets/agent/.claude/skills/assess/SKILL.md"),
+    ),
+    (
+        ".claude/skills/cv-advice/SKILL.md",
+        include_str!("../assets/agent/.claude/skills/cv-advice/SKILL.md"),
     ),
     (
         ".claude/skills/cv-digest/SKILL.md",
@@ -256,6 +262,14 @@ mod tests {
         assert!(assess.contains("never collapse a stated range into one number"));
         assert!(assess.contains("fit.suggestions"));
 
+        // The assess skill guards the layer split: preferences may not move
+        // any scored field.
+        assert!(assess.contains("is preference, not evidence"));
+
+        let advice = embedded(".claude/skills/cv-advice/SKILL.md");
+        assert!(advice.contains("Never invent experience"));
+        assert!(advice.contains("paste-ready"));
+
         let digest = embedded(".claude/skills/cv-digest/SKILL.md");
         assert!(digest.contains("Preserve EVERY skill"));
 
@@ -263,7 +277,9 @@ mod tests {
         assert!(compact.contains("AT MOST 10"));
 
         assert_eq!(embedded("CLAUDE.md").trim(), "@AGENTS.md");
-        for task in [AgentTask::Assess, AgentTask::CvDigest, AgentTask::FeedbackCompact] {
+        for task in
+            [AgentTask::Assess, AgentTask::CvAdvice, AgentTask::CvDigest, AgentTask::FeedbackCompact]
+        {
             assert!(embedded("AGENTS.md").contains(&task.skill_path()));
         }
     }

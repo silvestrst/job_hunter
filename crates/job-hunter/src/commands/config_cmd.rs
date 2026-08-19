@@ -58,6 +58,21 @@ pub fn check() -> Result<()> {
         }
         Err(e) => println!("cv:       {} - NOT READABLE: {e}", cv_path.display()),
     }
+    // The supplements travel with every assessment, so a typo'd path is worth
+    // catching here rather than at the next `assess`.
+    for (label, configured) in [
+        ("background:", config.resources.background_path.as_deref()),
+        ("wants:", config.resources.preferences_path.as_deref()),
+    ] {
+        let Some(path) = configured else { continue };
+        let expanded = expand_tilde(path);
+        match std::fs::read_to_string(&expanded) {
+            Ok(text) => {
+                println!("  + {label:<11} {} ({} chars)", expanded.display(), text.chars().count())
+            }
+            Err(e) => println!("  + {label:<11} {} - NOT READABLE: {e}", expanded.display()),
+        }
+    }
 
     let resolved_command: Vec<String> = config
         .agent
@@ -82,6 +97,9 @@ pub fn check() -> Result<()> {
             FileStatus::Missing => "missing (created on next use or `config init`)",
         };
         println!("  {rel:<42} {label}");
+    }
+    if statuses.iter().any(|(_, s)| *s == FileStatus::Edited) {
+        println!("  (edited files are yours - delete one to restore the shipped default)");
     }
     if statuses.iter().all(|(_, s)| *s != FileStatus::Missing) {
         println!(

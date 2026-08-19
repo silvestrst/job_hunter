@@ -1,43 +1,15 @@
-use super::{ensure_score, job_label, Ctx};
-use anyhow::{bail, Context, Result};
+use super::{ensure_score, job_label, Ctx, Heartbeat};
+use anyhow::{bail, Result};
 use clap::Args;
 use job_hunter_core::agent::AgentRunner;
 use job_hunter_core::assessment::prompt;
-use job_hunter_core::assessment::schema::CURRENT_SCHEMA_VERSION;
-use job_hunter_core::db::{JobFilter, JobStatus};
+use job_hunter_core::assessment::schema::{AssessmentFacts, CURRENT_SCHEMA_VERSION};
+use job_hunter_core::db::{AssessmentKey, JobFilter, JobStatus, NewAssessment};
+use job_hunter_core::profile::Profile;
 use job_hunter_core::workspace::AgentTask;
-use job_hunter_core::{feedback, normalize_identity, paths::expand_tilde, sha256_hex};
+use job_hunter_core::{feedback, normalize_identity, sha256_hex};
 use std::io::Write;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
-
-/// Prints a "." every `interval` while an agent call is in flight, so a single
-/// job that takes the full timeout doesn't look like the CLI has hung.
-struct Heartbeat {
-    stop_tx: mpsc::Sender<()>,
-    handle: std::thread::JoinHandle<()>,
-}
-
-impl Heartbeat {
-    fn start(interval: Duration) -> Self {
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let handle = std::thread::spawn(move || loop {
-            match stop_rx.recv_timeout(interval) {
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    print!(".");
-                    let _ = std::io::stdout().flush();
-                }
-                _ => break,
-            }
-        });
-        Self { stop_tx, handle }
-    }
-
-    fn stop(self) {
-        let _ = self.stop_tx.send(());
-        let _ = self.handle.join();
-    }
-}
 
 #[derive(Args)]
 pub struct AssessArgs {
@@ -82,6 +54,24 @@ fn cv_for_prompt(ctx: &Ctx, runner: &AgentRunner, cv_text: &str, cv_hash: &str) 
     Ok(digest.trim().to_string())
 }
 
+/// ", +background +preferences" - names the supplementary documents in play,
+/// so a prompt that grew is visible in the run header rather than only in the
+/// re-assessment it triggers.
+pub fn profile_summary(profile: &Profile) -> String {
+    let mut parts = Vec::new();
+    if profile.background.is_some() {
+        parts.push("+background");
+    }
+    if profile.preferences.is_some() {
+        parts.push("+preferences");
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(", profile {}", parts.join(" "))
+    }
+}
+
 pub fn run(args: AssessArgs) -> Result<()> {
     run_with_ctx(&Ctx::load()?, args)
 }
@@ -90,13 +80,17 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     let criteria_hash = ctx.config.criteria_hash();
     let prompt_version = ctx.config.assessment.prompt_version;
 
-    let cv_path = expand_tilde(&ctx.config.resources.cv_path);
-    let cv_text = std::fs::read_to_string(&cv_path)
-        .with_context(|| format!("cannot read CV at {} (resources.cv_path)", cv_path.display()))?;
-    let cv_hash = sha256_hex(cv_text.as_bytes());
+    let profile = Profile::load(&ctx.config.resources)?;
+    let supplement_hash = profile.supplement_hash();
 
     let workspace = ctx.agent_workspace()?;
     let instructions_hash = workspace.instructions_hash(AgentTask::Assess)?;
+    let key = AssessmentKey {
+        cv_hash: &profile.cv_hash,
+        profile_hash: supplement_hash.as_deref(),
+        prompt_version,
+        instructions_hash: &instructions_hash,
+    };
 
     // Which jobs need the LLM?
     let mut targets = Vec::new();
@@ -106,9 +100,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
             include_duplicates: false,
         })?;
         for job in candidates {
-            if args.force
-                || !ctx.db.assessment_exists(job.id, &cv_hash, prompt_version, &instructions_hash)?
-            {
+            if args.force || !ctx.db.assessment_exists(job.id, &key)? {
                 targets.push(job);
             }
         }
@@ -119,10 +111,8 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
                 println!("job #{id} is a duplicate of #{canonical} - skipping (assess #{canonical} instead)");
                 continue;
             }
-            if !args.force
-                && ctx.db.assessment_exists(job.id, &cv_hash, prompt_version, &instructions_hash)?
-            {
-                println!("job #{id} already assessed under the current CV/prompt/instructions - use --force to re-run");
+            if !args.force && ctx.db.assessment_exists(job.id, &key)? {
+                println!("job #{id} already assessed under the current profile/prompt/instructions - use --force to re-run");
                 continue;
             }
             targets.push(job);
@@ -134,21 +124,24 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     }
 
     let runner = AgentRunner::new(&ctx.config.agent).with_workspace(workspace.dir.clone());
-    let cv_prompt_text = cv_for_prompt(&ctx, &runner, &cv_text, &cv_hash)?;
+    let cv_prompt_text = cv_for_prompt(ctx, &runner, &profile.cv_text, &profile.cv_hash)?;
+    let profile_prompt =
+        profile.for_prompt(cv_prompt_text, ctx.config.assessment.max_profile_chars);
     let feedback_digest = feedback::build_prompt_digest(&ctx.db, ctx.config.assessment.feedback_recent_n)?;
     let feedback_digest_hash = feedback_digest.as_deref().map(|d| sha256_hex(d.as_bytes())[..16].to_string());
     let agent_command = ctx.config.agent.command.join(" ");
 
     let total = targets.len();
     println!(
-        "Assessing {total} job(s) with `{agent_command}` (workspace {}, instructions {instructions_hash})...\n",
-        workspace.dir.display()
+        "Assessing {total} job(s) with `{agent_command}` (workspace {}, instructions {instructions_hash}{})...\n",
+        workspace.dir.display(),
+        profile_summary(&profile),
     );
     let overall_start = Instant::now();
     let mut failures = 0usize;
     for (i, job) in targets.iter().enumerate() {
         let assessment_prompt = prompt::build_assessment_prompt(
-            &cv_prompt_text,
+            &profile_prompt,
             feedback_digest.as_deref(),
             &job.content_text,
             ctx.config.assessment.max_job_chars,
@@ -158,7 +151,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
 
         let heartbeat = Heartbeat::start(Duration::from_secs(5));
         let started = Instant::now();
-        let result = runner.run_facts(&assessment_prompt);
+        let result = runner.run_json::<AssessmentFacts>(&assessment_prompt);
         heartbeat.stop();
         let elapsed = started.elapsed().as_secs_f64();
 
@@ -171,16 +164,21 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
             }
         };
 
-        ctx.db.upsert_assessment(
-            job.id,
-            &cv_hash,
+        ctx.db.upsert_assessment(&NewAssessment {
+            job_id: job.id,
+            cv_hash: &profile.cv_hash,
+            profile_hash: supplement_hash.as_deref(),
             prompt_version,
-            if facts.schema_version > 0 { facts.schema_version } else { CURRENT_SCHEMA_VERSION },
-            feedback_digest_hash.as_deref(),
-            Some(&instructions_hash),
-            &agent_command,
-            &facts_json,
-        )?;
+            schema_version: if facts.schema_version > 0 {
+                facts.schema_version
+            } else {
+                CURRENT_SCHEMA_VERSION
+            },
+            feedback_digest_hash: feedback_digest_hash.as_deref(),
+            instructions_hash: Some(&instructions_hash),
+            agent_command: &agent_command,
+            facts_json: &facts_json,
+        })?;
 
         // Backfill LLM-extracted identity; link title+company duplicates.
         let title_norm = facts.extracted.job_title.as_deref().and_then(normalize_identity);
@@ -202,7 +200,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
             ctx.db.set_status(job.id, JobStatus::Assessed, None)?;
         }
 
-        let scored = ensure_score(&ctx, job.id, &criteria_hash)?;
+        let scored = ensure_score(ctx, job.id, &criteria_hash)?;
         match scored {
             Some((_, score)) => {
                 let mark = if score.hard_filter_passed { "✓" } else { "✗ filtered" };
@@ -226,67 +224,10 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use job_hunter_core::config::Config;
-    use job_hunter_core::db::Db;
-    use job_hunter_core::ingest::{ingest_payload, ScrapedPayload};
-    use job_hunter_core::paths::Paths;
-    use std::path::{Path, PathBuf};
-
-    fn fixtures_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures").canonicalize().unwrap()
-    }
-
-    /// Ctx over a temp dir, configured with the given agent argv.
-    fn test_ctx(dir: &Path, agent_command: &[String]) -> Ctx {
-        let fixtures = fixtures_dir();
-        let command_yaml: Vec<String> =
-            agent_command.iter().map(|c| format!("{c:?}")).collect();
-        let config_yaml = format!(
-            r#"
-resources:
-  cv_path: {cv}
-agent:
-  command: [{command}]
-  output: claude_json
-  timeout_secs: 30
-  retries: 2
-criteria:
-  currency_rates_to_gbp: {{USD: 0.78, EUR: 0.86}}
-  hard_filters:
-    - {{fact: salary_max_gbp, op: gte, value: 85000, if_missing: pass}}
-    - {{fact: work_mode, op: in, value: [remote, hybrid], if_missing: fail}}
-  soft:
-    - {{fact: overall_cv_match, weight: 5}}
-    - {{fact: seniority_fit, weight: 3}}
-    - {{fact: salary_max_gbp, weight: 3, target: 120000}}
-    - {{fact: domain_familiarity, weight: 1}}
-"#,
-            cv = fixtures.join("sample-cv.md").display(),
-            command = command_yaml.join(", "),
-        );
-        let config_file = dir.join("config.yaml");
-        std::fs::write(&config_file, config_yaml).unwrap();
-        let config = Config::load(&config_file).unwrap();
-        let db = Db::open(&dir.join("job_hunter.db")).unwrap();
-        Ctx {
-            paths: Paths {
-                config_file,
-                data_dir: dir.to_path_buf(),
-                db_file: dir.join("job_hunter.db"),
-                api_token_file: dir.join("api_token"),
-                cv_digest_dir: dir.join("cv_digest"),
-                agent_workspace_dir: dir.join("agent"),
-                systemd_unit_file: dir.join("job-hunter.service"),
-            },
-            config,
-            db,
-        }
-    }
-
-    fn load_payload(name: &str) -> ScrapedPayload {
-        let text = std::fs::read_to_string(fixtures_dir().join("payloads").join(name)).unwrap();
-        serde_json::from_str(&text).unwrap()
-    }
+    use crate::commands::test_support::{
+        fixtures_dir, load_payload, mock_agent, test_ctx, test_ctx_with_resources,
+    };
+    use job_hunter_core::ingest::ingest_payload;
 
     fn assess_all(ctx: &Ctx) -> Result<()> {
         run_with_ctx(ctx, AssessArgs { ids: vec![], all: true, force: false })
@@ -295,8 +236,7 @@ criteria:
     #[test]
     fn full_pipeline_assesses_scores_and_links_duplicates() {
         let dir = tempfile::tempdir().unwrap();
-        let mock = fixtures_dir().join("mock-agent.sh");
-        let ctx = test_ctx(dir.path(), &[mock.to_string_lossy().into_owned()]);
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", None));
 
         let first = ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         let second =
@@ -328,8 +268,7 @@ criteria:
     #[test]
     fn criteria_change_rescores_without_agent() {
         let dir = tempfile::tempdir().unwrap();
-        let mock = fixtures_dir().join("mock-agent.sh");
-        let mut ctx = test_ctx(dir.path(), &[mock.to_string_lossy().into_owned()]);
+        let mut ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", None));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         assess_all(&ctx).unwrap();
         let hash_before = ctx.config.criteria_hash();
@@ -338,7 +277,7 @@ criteria:
         // Tighten the salary filter; swap the agent for one that always fails
         // to prove rescoring never invokes it.
         ctx.config.criteria.hard_filters[0].value = serde_json::json!(150000);
-        ctx.config.agent.command = vec![fixtures_dir().join("mock-agent-fail.sh").to_string_lossy().into_owned()];
+        ctx.config.agent.command = mock_agent("mock-agent-fail.sh", None);
         let hash_after = ctx.config.criteria_hash();
         assert_ne!(hash_before, hash_after);
 
@@ -367,8 +306,7 @@ criteria:
     #[test]
     fn failing_agent_reports_and_leaves_job_unassessed() {
         let dir = tempfile::tempdir().unwrap();
-        let script = fixtures_dir().join("mock-agent-fail.sh");
-        let ctx = test_ctx(dir.path(), &[script.to_string_lossy().into_owned()]);
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent-fail.sh", None));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         let err = assess_all(&ctx).unwrap_err();
         assert!(format!("{err}").contains("1 of 1"));
@@ -380,13 +318,7 @@ criteria:
     fn editing_instructions_reassesses_without_force() {
         let dir = tempfile::tempdir().unwrap();
         let capture = dir.path().join("captured-prompt");
-        let script = fixtures_dir().join("mock-agent.sh");
-        let command = vec![
-            "env".to_string(),
-            format!("MOCK_CAPTURE_FILE={}", capture.display()),
-            script.to_string_lossy().into_owned(),
-        ];
-        let ctx = test_ctx(dir.path(), &command);
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", Some(&capture)));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
 
         assess_all(&ctx).unwrap();
@@ -415,13 +347,7 @@ criteria:
     fn prompt_is_pointer_plus_data_and_workspace_is_materialized() {
         let dir = tempfile::tempdir().unwrap();
         let capture = dir.path().join("captured-prompt");
-        let script = fixtures_dir().join("mock-agent.sh");
-        let command = vec![
-            "env".to_string(),
-            format!("MOCK_CAPTURE_FILE={}", capture.display()),
-            script.to_string_lossy().into_owned(),
-        ];
-        let ctx = test_ctx(dir.path(), &command);
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", Some(&capture)));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         assess_all(&ctx).unwrap();
 
@@ -446,14 +372,23 @@ criteria:
     fn legacy_null_hash_rows_are_not_rerun() {
         let dir = tempfile::tempdir().unwrap();
         // A failing agent proves no LLM call happens for grandfathered rows.
-        let script = fixtures_dir().join("mock-agent-fail.sh");
-        let ctx = test_ctx(dir.path(), &[script.to_string_lossy().into_owned()]);
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent-fail.sh", None));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
 
         let cv_text = std::fs::read_to_string(fixtures_dir().join("sample-cv.md")).unwrap();
         let cv_hash = job_hunter_core::sha256_hex(cv_text.as_bytes());
         ctx.db
-            .upsert_assessment(1, &cv_hash, 1, 1, None, None, "old-binary", r#"{"schema_version":1}"#)
+            .upsert_assessment(&NewAssessment {
+                job_id: 1,
+                cv_hash: &cv_hash,
+                profile_hash: None,
+                prompt_version: 1,
+                schema_version: 1,
+                feedback_digest_hash: None,
+                instructions_hash: None,
+                agent_command: "old-binary",
+                facts_json: r#"{"schema_version":1}"#,
+            })
             .unwrap();
 
         assess_all(&ctx).unwrap();
@@ -461,16 +396,62 @@ criteria:
     }
 
     #[test]
+    fn supplementary_documents_reach_the_prompt_and_rerun_on_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("captured-prompt");
+        let command = mock_agent("mock-agent.sh", Some(&capture));
+        let background = dir.path().join("background.md");
+        let preferences = dir.path().join("preferences.md");
+        std::fs::write(&background, "Rewrote the payments ledger end to end.").unwrap();
+        std::fs::write(&preferences, "Remote only. No on-call rota.").unwrap();
+        let resources = format!(
+            "  background_path: {}\n  preferences_path: {}",
+            background.display(),
+            preferences.display()
+        );
+        let ctx = test_ctx_with_resources(dir.path(), &command, &resources);
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+
+        assess_all(&ctx).unwrap();
+        let prompt = std::fs::read_to_string(&capture).unwrap();
+        assert!(prompt.contains("Rewrote the payments ledger end to end."));
+        assert!(prompt.contains("No on-call rota."));
+        let first = ctx.db.latest_assessment(1).unwrap().unwrap().profile_hash;
+        assert!(first.is_some(), "the supplements are hashed into the assessment");
+
+        // Unchanged profile: nothing to do.
+        assess_all(&ctx).unwrap();
+        let prompt = std::fs::read_to_string(&capture).unwrap();
+        assert_eq!(prompt.matches("\n----\n").count(), 1);
+
+        // Editing a supplement re-runs, exactly like editing the CV.
+        std::fs::write(&preferences, "Remote only. On-call is fine.").unwrap();
+        assess_all(&ctx).unwrap();
+        let prompt = std::fs::read_to_string(&capture).unwrap();
+        assert_eq!(prompt.matches("\n----\n").count(), 2);
+        assert_ne!(ctx.db.latest_assessment(1).unwrap().unwrap().profile_hash, first);
+    }
+
+    #[test]
+    fn a_profile_with_no_supplements_is_not_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", None));
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+        assess_all(&ctx).unwrap();
+        assert!(ctx.db.latest_assessment(1).unwrap().unwrap().profile_hash.is_none());
+
+        // A failing agent proves the second run makes no call at all.
+        let mut ctx = ctx;
+        ctx.config.agent.command =
+            mock_agent("mock-agent-fail.sh", None);
+        assess_all(&ctx).unwrap();
+    }
+
+    #[test]
     fn feedback_digest_is_injected_into_prompts() {
         let dir = tempfile::tempdir().unwrap();
         let capture = dir.path().join("captured-prompt");
-        let script = fixtures_dir().join("mock-agent.sh");
-        let command = vec![
-            "env".to_string(),
-            format!("MOCK_CAPTURE_FILE={}", capture.display()),
-            script.to_string_lossy().into_owned(),
-        ];
-        let ctx = test_ctx(dir.path(), &command);
+        let ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", Some(&capture)));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         ctx.db.insert_feedback(None, "never rank agencies above product companies").unwrap();
 

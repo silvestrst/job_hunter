@@ -1,3 +1,4 @@
+pub mod advice;
 pub mod agent;
 pub mod assessment;
 pub mod cleaner;
@@ -6,6 +7,7 @@ pub mod db;
 pub mod feedback;
 pub mod ingest;
 pub mod paths;
+pub mod profile;
 pub mod scoring;
 pub mod token;
 pub mod urlnorm;

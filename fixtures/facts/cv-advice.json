@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "positioning": "A payments-infrastructure Rust engineer, not a general backend generalist - lead with the ledger work.",
+  "rewrites": [
+    {
+      "section": "Skills",
+      "current": "Rust (6 years, production), PostgreSQL, AWS, Linux, CI/CD. Some Kubernetes.",
+      "suggested": "Rust (6 years, production payments systems), PostgreSQL, AWS, Linux, CI/CD, Kubernetes.",
+      "why": "the posting screens for payments depth before it screens for breadth"
+    },
+    {
+      "section": "Experience - Payments Ltd",
+      "current": "Rust payment services, PostgreSQL, AWS.",
+      "suggested": "Built and ran Rust payment services on PostgreSQL and AWS, owning the settlement path end to end.",
+      "why": "names the ownership the posting asks for instead of listing technologies"
+    }
+  ],
+  "emphasise": ["the Payments Ltd settlement work", "six years of production Rust"],
+  "deemphasise": ["the pre-2017 education detail"],
+  "gaps": [
+    {"gap": "Kafka", "how_to_address": "name the queue and streaming work you did at Webshop GmbH instead of leaving it blank"}
+  ],
+  "keywords": ["event-driven", "settlement", "PCI DSS"],
+  "notes": "Everything here is already on the CV or in the background document - nothing needs inventing."
+}

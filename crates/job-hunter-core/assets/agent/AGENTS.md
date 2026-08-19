@@ -19,5 +19,6 @@ working directory; each prompt is one self-contained task.
 | Task | Instructions |
 |------|--------------|
 | assess | .claude/skills/assess/SKILL.md |
+| cv-advice | .claude/skills/cv-advice/SKILL.md |
 | cv-digest | .claude/skills/cv-digest/SKILL.md |
 | feedback-compact | .claude/skills/feedback-compact/SKILL.md |

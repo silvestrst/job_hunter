@@ -79,7 +79,32 @@ CREATE UNIQUE INDEX idx_jobs_title_company ON jobs(title_normalized, company_nor
     // Hash of the agent workspace instructions (AGENTS.md + task skill) in
     // effect when the assessment ran. NULL on pre-workspace rows, which are
     // grandfathered - see Db::assessment_exists.
-    M::up("ALTER TABLE assessments ADD COLUMN instructions_hash TEXT;")])
+    M::up("ALTER TABLE assessments ADD COLUMN instructions_hash TEXT;"),
+    // Hash of the supplementary profile documents (background, preferences)
+    // in effect for the assessment; NULL means "none configured", compared
+    // NULL-safely with IS - see Db::assessment_exists. Plus the CV advice
+    // `cv-advice` produces, one row per assessment: derived from that
+    // assessment's facts, so it is dropped whenever those facts are replaced.
+    M::up(
+        r#"
+ALTER TABLE assessments ADD COLUMN profile_hash TEXT;
+
+CREATE TABLE cv_advice (
+  id                INTEGER PRIMARY KEY,
+  job_id            INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  assessment_id     INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+  schema_version    INTEGER NOT NULL,
+  profile_hash      TEXT,
+  instructions_hash TEXT,
+  agent_command     TEXT,
+  advice_json       TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  UNIQUE(assessment_id)
+);
+
+CREATE INDEX idx_cv_advice_job ON cv_advice(job_id);
+"#,
+    )])
 }
 
 #[cfg(test)]
