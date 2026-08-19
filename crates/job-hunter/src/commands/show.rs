@@ -46,7 +46,12 @@ pub fn run(id: i64) -> Result<()> {
         None => println!("\nNot assessed yet - run `job-hunter assess {id}`."),
         Some((assessment, score)) => {
             let facts = assessment.facts()?;
-            println!("\n## Assessment (cv {} / prompt v{}, {})",
+            let instr = assessment
+                .instructions_hash
+                .as_deref()
+                .map(|h| format!(" / instr {h}"))
+                .unwrap_or_default();
+            println!("\n## Assessment (cv {} / prompt v{}{instr}, {})",
                 &assessment.cv_hash[..8.min(assessment.cv_hash.len())],
                 assessment.prompt_version,
                 assessment.created_at

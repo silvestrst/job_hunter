@@ -201,13 +201,43 @@ to GBP/year: day×220, hour×1840), `work_mode`, `employment_type`, `seniority_l
 `seniority_fit`, `overall_cv_match`, `domain_familiarity`, `visa_sponsorship`, `country`,
 `skill:<name>`. Typos are caught by `config check`, which lists these.
 
+## The agent workspace
+
+The agent CLI runs inside a prepared workspace directory (default
+`~/.config/job-hunter/agent`, override with `agent.workspace_dir`) that holds its
+instructions as standard conventions:
+
+```
+~/.config/job-hunter/agent/
+  AGENTS.md                                  # source of truth: role, conventions, task index
+  CLAUDE.md                                  # just "@AGENTS.md" (Claude Code import)
+  .claude/skills/assess/SKILL.md             # per-task instructions (Agent Skills format)
+  .claude/skills/cv-digest/SKILL.md
+  .claude/skills/feedback-compact/SKILL.md
+```
+
+Each prompt carries only what changes per call — a task pointer, the JSON contract, the
+CV, the feedback digest, and the job text. The instruction prose lives in these files:
+edit them freely to tune behaviour, no rebuild needed. Files are created from built-in
+defaults when missing (`config init` or first use) and never overwritten once present;
+to reset one, delete it and rerun `config init`. `config check` shows which files you've
+edited versus the shipped defaults.
+
+The instructions in effect (AGENTS.md + the task's SKILL.md) are hashed into every
+assessment, so editing them re-runs affected jobs on the next `assess` — exactly like a
+`prompt_version` bump. Assessments made before this mechanism existed are grandfathered
+and never silently re-run. One carve-out: an already-cached CV digest is keyed by CV
+content only, so editing `cv-digest/SKILL.md` won't regenerate it — delete the cache
+file under `~/.local/share/job-hunter/cv_digest/` to force that.
+
 ## Swapping the LLM agent
 
-The agent contract: it receives one self-contained prompt (argv `{prompt}` placeholder,
-or stdin when no placeholder is present) and must print the answer to stdout — either
-wrapped in Claude's JSON envelope (`output: claude_json`) or raw (`output: text`). JSON
-extraction is defensive (markdown fences and surrounding prose are tolerated), and invalid
-output is retried with the validation error appended.
+The agent contract: it receives one prompt (argv `{prompt}` placeholder, or stdin when
+no placeholder is present), runs with the workspace above as its working directory, and
+must print the answer to stdout — either wrapped in Claude's JSON envelope
+(`output: claude_json`) or raw (`output: text`). JSON extraction is defensive (markdown
+fences and surrounding prose are tolerated), and invalid output is retried with the
+validation error appended.
 
 ```yaml
 # Codex CLI instead of Claude Code:
@@ -218,9 +248,13 @@ agent:
 ```
 
 Anything works, including a shell script of your own — the test suite runs entirely
-against `fixtures/mock-agent.sh`. `model` and the `{model}` placeholder are optional but
-tied together: `config check` (and `Config::validate`) rejects one without the other, so
-there's no way to end up silently running whatever model the CLI defaults to.
+against `fixtures/mock-agent.sh`. Codex reads `AGENTS.md` natively; other CLIs reach the
+same files through the prompt's pointer line. A backend that can't read files at all
+still gets the JSON contract and data in every prompt (structure is enforced by the
+validation-retry loop), it just misses the instruction prose. `model` and the `{model}`
+placeholder are optional but tied together: `config check` (and `Config::validate`)
+rejects one without the other, so there's no way to end up silently running whatever
+model the CLI defaults to.
 
 ## Token economics
 
@@ -229,6 +263,7 @@ there's no way to end up silently running whatever model the CLI defaults to.
 | `assess` (one call per job) | `jobs`, `show`, `rescore` |
 | CV distillation (once, only if CV > `cv_verbatim_max_chars`) | any criteria edit + re-rank |
 | `feedback --compact` (deliberate, manual) | recording feedback, status changes |
+| editing agent workspace instructions (re-runs affected jobs on next `assess`) | |
 
 Levers: `agent.model` is the biggest one - pick the cheapest model that still extracts
 facts reliably; `max_job_chars` bounds the biggest prompt section; `cv_verbatim_max_chars`

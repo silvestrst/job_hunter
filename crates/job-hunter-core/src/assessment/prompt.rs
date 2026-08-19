@@ -1,6 +1,12 @@
 //! Prompt assembly. One LLM call per job performs both field extraction and
 //! CV-relative fit assessment (token efficiency: single pass, compact CV,
 //! bounded job text, bounded feedback).
+//!
+//! Prompts carry only what changes per call: a task pointer, the JSON
+//! contract, and the data. The instruction prose lives in the agent
+//! workspace (see `crate::workspace`), which the agent runs inside.
+
+use crate::workspace::AgentTask;
 
 /// The JSON contract shown to the agent. Kept as one literal so the schema the
 /// model sees and the serde types in `schema.rs` are reviewed side by side.
@@ -54,38 +60,25 @@ pub fn build_assessment_prompt(
         ),
         _ => String::new(),
     };
+    let pointer = AgentTask::Assess.instructions_pointer();
     format!(
-        "You assess job postings against a candidate's CV.\n\
+        "Task: assess the job posting below against the candidate's CV.\n\
+         {pointer}\n\
          Return ONLY a single JSON object matching this contract - no prose, no markdown fences:\n\
-         {FACTS_CONTRACT}\n\n\
-         Hard rules:\n\
-         - Extract facts only; never judge against preferences (no \"salary is good\").\n\
-         - Numbers as numbers, not prose. Salary in the posting's own currency and period.\n\
-         - If the posting states a salary range, set salary.min and salary.max to the range's \
-         low and high ends - never collapse a stated range into one number. A single stated \
-         figure goes in both min and max.\n\
-         - Unknown or unstated -> null or \"unspecified\". Never guess - EXCEPT salary: if the \
-         posting doesn't state one, estimate a realistic market range from the job title, \
-         seniority, location, industry, and tech stack; set salary.is_estimate=true, \
-         salary.raw_text=null, and lower confidence.salary to reflect the guess. If you can't \
-         even guess, leave salary.min/max null.\n\
-         - fit.* measures the CV below against this posting.\n\
-         - List every skill the posting emphasises in fit.skill_matches, matched or not.\n\
-         - fit.suggestions: 2-4 concrete, actionable suggestions for THIS candidate applying to \
-         THIS posting - what CV experience to foreground, gaps to address or preempt, questions \
-         worth asking. Specific to this CV and posting, not generic career advice.\n\
-         {feedback_section}\
+         {FACTS_CONTRACT}\n\
+         {feedback_section}\n\
          ## Candidate CV\n{cv_text}\n\n\
          ## Job posting\n{job}\n"
     )
 }
 
 pub fn build_cv_digest_prompt(cv_text: &str, max_words: usize) -> String {
+    let pointer = AgentTask::CvDigest.instructions_pointer();
     format!(
-        "Distill the CV below into at most {max_words} words for use as assessment context.\n\
-         Preserve EVERY skill, technology, employer, role title, duration, domain, and \
-         qualification - compress prose and formatting only; do not summarize away detail.\n\
-         Return only the distilled text, no preamble.\n\n{cv_text}"
+        "Task: distill the CV below for use as assessment context.\n\
+         {pointer}\n\
+         Word budget: at most {max_words} words.\n\n\
+         ## CV\n{cv_text}\n"
     )
 }
 
@@ -103,8 +96,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_contains_all_sections() {
+    fn prompt_contains_pointer_contract_and_data() {
         let p = build_assessment_prompt("MY CV", Some("- avoid agencies"), "JOB TEXT", 100);
+        // Both forms of the pointer: the name a skill-aware agent resolves,
+        // and the path any agent with a read tool can follow.
+        assert!(p.contains("`assess` skill"));
+        assert!(p.contains(".claude/skills/assess/SKILL.md"));
+        assert!(p.contains("AGENTS.md"));
         assert!(p.contains("MY CV"));
         assert!(p.contains("- avoid agencies"));
         assert!(p.contains("JOB TEXT"));
@@ -112,23 +110,21 @@ mod tests {
     }
 
     #[test]
-    fn instructs_salary_estimation_when_unstated() {
+    fn instruction_prose_lives_in_the_workspace_not_the_prompt() {
+        // The hard rules ship in the assess skill (pinned by workspace.rs
+        // tests); the prompt itself carries only the pointer.
         let p = build_assessment_prompt("CV", None, "JOB", 100);
-        assert!(p.contains("estimate a realistic market range"));
-        assert!(p.contains("is_estimate=true"));
+        assert!(!p.contains("Hard rules"));
+        assert!(!p.contains("never collapse a stated range"));
     }
 
     #[test]
-    fn instructs_preserving_stated_salary_ranges() {
-        let p = build_assessment_prompt("CV", None, "JOB", 100);
-        assert!(p.contains("never collapse a stated range into one number"));
-    }
-
-    #[test]
-    fn instructs_actionable_suggestions() {
-        let p = build_assessment_prompt("CV", None, "JOB", 100);
-        assert!(p.contains("fit.suggestions"));
-        assert!(p.contains("\"suggestions\""));
+    fn cv_digest_prompt_points_at_skill_and_states_budget() {
+        let p = build_cv_digest_prompt("CV TEXT", 800);
+        assert!(p.contains("`cv-digest` skill"));
+        assert!(p.contains(".claude/skills/cv-digest/SKILL.md"));
+        assert!(p.contains("at most 800 words"));
+        assert!(p.contains("CV TEXT"));
     }
 
     #[test]

@@ -52,6 +52,12 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_retries")]
     pub retries: u32,
+    /// Directory the agent runs in (its cwd), holding the instruction files -
+    /// AGENTS.md, CLAUDE.md, and per-task skills (`~/` is expanded). Defaults
+    /// to `<config dir>/agent`; missing files are created from the built-in
+    /// defaults and never overwritten once present.
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -190,6 +196,7 @@ impl Default for AgentConfig {
             output: AgentOutput::default(),
             timeout_secs: default_timeout_secs(),
             retries: default_retries(),
+            workspace_dir: None,
         }
     }
 }
@@ -282,6 +289,11 @@ agent:
   output: claude_json              # claude_json = unwrap Claude's JSON envelope; text = stdout as-is
   timeout_secs: 180
   retries: 2
+  # The agent runs inside the agent workspace (default ~/.config/job-hunter/agent),
+  # which holds its instructions: AGENTS.md, CLAUDE.md and one skill per task.
+  # Edit those files to tune behaviour - edits re-run affected assessments on
+  # the next `assess` (spends tokens). Uncomment to relocate the workspace:
+  # workspace_dir: ~/.config/job-hunter/agent
 
 assessment:
   prompt_version: 1                # bump to force re-assessment of every job
@@ -333,6 +345,24 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.agent.model.as_deref(), Some("claude-sonnet-5"));
         assert!(config.agent.command.iter().any(|a| a.contains("{model}")));
+    }
+
+    #[test]
+    fn workspace_dir_override_parses() {
+        assert!(
+            serde_yaml::from_str::<Config>(DEFAULT_CONFIG_YAML)
+                .unwrap()
+                .agent
+                .workspace_dir
+                .is_none()
+        );
+        let yaml = DEFAULT_CONFIG_YAML.replace(
+            "  # workspace_dir: ~/.config/job-hunter/agent",
+            "  workspace_dir: ~/custom-agent",
+        );
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.agent.workspace_dir.as_deref(), Some("~/custom-agent"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use job_hunter_core::agent::AgentRunner;
 use job_hunter_core::assessment::prompt;
 use job_hunter_core::assessment::schema::CURRENT_SCHEMA_VERSION;
 use job_hunter_core::db::{JobFilter, JobStatus};
+use job_hunter_core::workspace::AgentTask;
 use job_hunter_core::{feedback, normalize_identity, paths::expand_tilde, sha256_hex};
 use std::io::Write;
 use std::sync::mpsc;
@@ -94,6 +95,9 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
         .with_context(|| format!("cannot read CV at {} (resources.cv_path)", cv_path.display()))?;
     let cv_hash = sha256_hex(cv_text.as_bytes());
 
+    let workspace = ctx.agent_workspace()?;
+    let instructions_hash = workspace.instructions_hash(AgentTask::Assess)?;
+
     // Which jobs need the LLM?
     let mut targets = Vec::new();
     if args.ids.is_empty() {
@@ -102,7 +106,9 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
             include_duplicates: false,
         })?;
         for job in candidates {
-            if args.force || !ctx.db.assessment_exists(job.id, &cv_hash, prompt_version)? {
+            if args.force
+                || !ctx.db.assessment_exists(job.id, &cv_hash, prompt_version, &instructions_hash)?
+            {
                 targets.push(job);
             }
         }
@@ -113,8 +119,10 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
                 println!("job #{id} is a duplicate of #{canonical} - skipping (assess #{canonical} instead)");
                 continue;
             }
-            if !args.force && ctx.db.assessment_exists(job.id, &cv_hash, prompt_version)? {
-                println!("job #{id} already assessed under the current CV/prompt - use --force to re-run");
+            if !args.force
+                && ctx.db.assessment_exists(job.id, &cv_hash, prompt_version, &instructions_hash)?
+            {
+                println!("job #{id} already assessed under the current CV/prompt/instructions - use --force to re-run");
                 continue;
             }
             targets.push(job);
@@ -125,14 +133,17 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
         return Ok(());
     }
 
-    let runner = AgentRunner::new(&ctx.config.agent);
+    let runner = AgentRunner::new(&ctx.config.agent).with_workspace(workspace.dir.clone());
     let cv_prompt_text = cv_for_prompt(&ctx, &runner, &cv_text, &cv_hash)?;
     let feedback_digest = feedback::build_prompt_digest(&ctx.db, ctx.config.assessment.feedback_recent_n)?;
     let feedback_digest_hash = feedback_digest.as_deref().map(|d| sha256_hex(d.as_bytes())[..16].to_string());
     let agent_command = ctx.config.agent.command.join(" ");
 
     let total = targets.len();
-    println!("Assessing {total} job(s) with `{agent_command}`...\n");
+    println!(
+        "Assessing {total} job(s) with `{agent_command}` (workspace {}, instructions {instructions_hash})...\n",
+        workspace.dir.display()
+    );
     let overall_start = Instant::now();
     let mut failures = 0usize;
     for (i, job) in targets.iter().enumerate() {
@@ -166,6 +177,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
             prompt_version,
             if facts.schema_version > 0 { facts.schema_version } else { CURRENT_SCHEMA_VERSION },
             feedback_digest_hash.as_deref(),
+            Some(&instructions_hash),
             &agent_command,
             &facts_json,
         )?;
@@ -263,6 +275,7 @@ criteria:
                 db_file: dir.join("job_hunter.db"),
                 api_token_file: dir.join("api_token"),
                 cv_digest_dir: dir.join("cv_digest"),
+                agent_workspace_dir: dir.join("agent"),
                 systemd_unit_file: dir.join("job-hunter.service"),
             },
             config,
@@ -361,6 +374,90 @@ criteria:
         assert!(format!("{err}").contains("1 of 1"));
         assert!(ctx.db.latest_assessment(1).unwrap().is_none());
         assert_eq!(ctx.db.get_job(1).unwrap().status, "new");
+    }
+
+    #[test]
+    fn editing_instructions_reassesses_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("captured-prompt");
+        let script = fixtures_dir().join("mock-agent.sh");
+        let command = vec![
+            "env".to_string(),
+            format!("MOCK_CAPTURE_FILE={}", capture.display()),
+            script.to_string_lossy().into_owned(),
+        ];
+        let ctx = test_ctx(dir.path(), &command);
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+
+        assess_all(&ctx).unwrap();
+        let first_hash = ctx.db.latest_assessment(1).unwrap().unwrap().instructions_hash;
+        assert!(first_hash.is_some(), "assessments store the instructions hash");
+
+        // Edit the assess skill: the next plain `assess` must re-run the job.
+        let skill = dir.path().join("agent").join(AgentTask::Assess.skill_path());
+        let mut text = std::fs::read_to_string(&skill).unwrap();
+        text.push_str("\n- Also flag on-call expectations.\n");
+        std::fs::write(&skill, text).unwrap();
+        assess_all(&ctx).unwrap();
+
+        let second_hash = ctx.db.latest_assessment(1).unwrap().unwrap().instructions_hash;
+        assert_ne!(first_hash, second_hash);
+        let prompts = std::fs::read_to_string(&capture).unwrap();
+        assert_eq!(prompts.matches("\n----\n").count(), 2, "two agent calls so far");
+
+        // Unchanged instructions: nothing to do, no third call.
+        assess_all(&ctx).unwrap();
+        let prompts = std::fs::read_to_string(&capture).unwrap();
+        assert_eq!(prompts.matches("\n----\n").count(), 2);
+    }
+
+    #[test]
+    fn prompt_is_pointer_plus_data_and_workspace_is_materialized() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("captured-prompt");
+        let script = fixtures_dir().join("mock-agent.sh");
+        let command = vec![
+            "env".to_string(),
+            format!("MOCK_CAPTURE_FILE={}", capture.display()),
+            script.to_string_lossy().into_owned(),
+        ];
+        let ctx = test_ctx(dir.path(), &command);
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+        assess_all(&ctx).unwrap();
+
+        // The workspace was auto-created next to the test config.
+        let ws = dir.path().join("agent");
+        assert!(ws.join("AGENTS.md").exists());
+        assert!(ws.join("CLAUDE.md").exists());
+        assert!(ws.join(AgentTask::Assess.skill_path()).exists());
+
+        // The prompt carries the pointer, contract, and data - not the rules
+        // prose, which lives in the skill file. (The mock ignores its cwd
+        // entirely, proving mock backends need no workspace awareness.)
+        let prompt = std::fs::read_to_string(&capture).unwrap();
+        assert!(prompt.contains(".claude/skills/assess/SKILL.md"));
+        assert!(prompt.contains("schema_version"));
+        assert!(prompt.contains("Test Candidate"), "CV embedded");
+        assert!(prompt.contains("Senior Rust Engineer"), "job text embedded");
+        assert!(!prompt.contains("never collapse a stated range"));
+    }
+
+    #[test]
+    fn legacy_null_hash_rows_are_not_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        // A failing agent proves no LLM call happens for grandfathered rows.
+        let script = fixtures_dir().join("mock-agent-fail.sh");
+        let ctx = test_ctx(dir.path(), &[script.to_string_lossy().into_owned()]);
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+
+        let cv_text = std::fs::read_to_string(fixtures_dir().join("sample-cv.md")).unwrap();
+        let cv_hash = job_hunter_core::sha256_hex(cv_text.as_bytes());
+        ctx.db
+            .upsert_assessment(1, &cv_hash, 1, 1, None, None, "old-binary", r#"{"schema_version":1}"#)
+            .unwrap();
+
+        assess_all(&ctx).unwrap();
+        assert!(ctx.db.latest_assessment(1).unwrap().unwrap().instructions_hash.is_none());
     }
 
     #[test]

@@ -72,6 +72,7 @@ pub struct Assessment {
     pub cv_hash: String,
     pub prompt_version: i64,
     pub schema_version: i64,
+    pub instructions_hash: Option<String>,
     pub facts_json: String,
     pub created_at: String,
 }
@@ -340,21 +341,24 @@ impl Db {
         prompt_version: i64,
         schema_version: i64,
         feedback_digest_hash: Option<&str>,
+        instructions_hash: Option<&str>,
         agent_command: &str,
         facts_json: &str,
     ) -> Result<i64> {
         let id: i64 = self.conn.query_row(
             "INSERT INTO assessments (job_id, cv_hash, prompt_version, schema_version,
-                                      feedback_digest_hash, agent_command, facts_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                      feedback_digest_hash, instructions_hash, agent_command,
+                                      facts_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(job_id, cv_hash, prompt_version) DO UPDATE SET
                 schema_version = excluded.schema_version,
                 feedback_digest_hash = excluded.feedback_digest_hash,
+                instructions_hash = excluded.instructions_hash,
                 agent_command = excluded.agent_command,
                 facts_json = excluded.facts_json,
                 created_at = excluded.created_at
              RETURNING id",
-            params![job_id, cv_hash, prompt_version, schema_version, feedback_digest_hash, agent_command, facts_json, now_utc()],
+            params![job_id, cv_hash, prompt_version, schema_version, feedback_digest_hash, instructions_hash, agent_command, facts_json, now_utc()],
             |r| r.get(0),
         )?;
         self.conn
@@ -368,7 +372,8 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, job_id, cv_hash, prompt_version, schema_version, facts_json, created_at
+                "SELECT id, job_id, cv_hash, prompt_version, schema_version, instructions_hash,
+                        facts_json, created_at
                  FROM assessments WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
                 [job_id],
                 |r| {
@@ -378,20 +383,32 @@ impl Db {
                         cv_hash: r.get(2)?,
                         prompt_version: r.get(3)?,
                         schema_version: r.get(4)?,
-                        facts_json: r.get(5)?,
-                        created_at: r.get(6)?,
+                        instructions_hash: r.get(5)?,
+                        facts_json: r.get(6)?,
+                        created_at: r.get(7)?,
                     })
                 },
             )
             .optional()?)
     }
 
-    pub fn assessment_exists(&self, job_id: i64, cv_hash: &str, prompt_version: i64) -> Result<bool> {
+    /// Whether a current assessment exists. Rows with a NULL
+    /// instructions_hash predate the agent workspace and are grandfathered as
+    /// matching, so upgrading never silently re-spends tokens.
+    pub fn assessment_exists(
+        &self,
+        job_id: i64,
+        cv_hash: &str,
+        prompt_version: i64,
+        instructions_hash: &str,
+    ) -> Result<bool> {
         let found: Option<i64> = self
             .conn
             .query_row(
-                "SELECT id FROM assessments WHERE job_id = ?1 AND cv_hash = ?2 AND prompt_version = ?3",
-                params![job_id, cv_hash, prompt_version],
+                "SELECT id FROM assessments
+                 WHERE job_id = ?1 AND cv_hash = ?2 AND prompt_version = ?3
+                   AND (instructions_hash IS NULL OR instructions_hash = ?4)",
+                params![job_id, cv_hash, prompt_version, instructions_hash],
                 |r| r.get(0),
             )
             .optional()?;
@@ -599,19 +616,32 @@ mod tests {
     fn assessment_upsert_replaces_and_drops_scores() {
         let db = seeded_db();
         let a1 = db
-            .upsert_assessment(1, "cv1", 1, 1, None, "mock", r#"{"schema_version":1}"#)
+            .upsert_assessment(1, "cv1", 1, 1, None, Some("aaaa"), "mock", r#"{"schema_version":1}"#)
             .unwrap();
         db.upsert_score(1, a1, "crit1", 80.0, true, "[]").unwrap();
         assert!(db.get_score(a1, "crit1").unwrap().is_some());
 
         let a2 = db
-            .upsert_assessment(1, "cv1", 1, 1, None, "mock", r#"{"schema_version":2}"#)
+            .upsert_assessment(1, "cv1", 1, 1, None, Some("bbbb"), "mock", r#"{"schema_version":2}"#)
             .unwrap();
         assert_eq!(a1, a2);
         assert!(db.get_score(a2, "crit1").unwrap().is_none());
 
         let latest = db.latest_assessment(1).unwrap().unwrap();
         assert!(latest.facts_json.contains("\"schema_version\":2"));
+        assert_eq!(latest.instructions_hash.as_deref(), Some("bbbb"));
+    }
+
+    #[test]
+    fn assessment_exists_keys_on_instructions_hash() {
+        let db = seeded_db();
+        db.upsert_assessment(1, "cv1", 1, 1, None, Some("aaaa"), "mock", "{}").unwrap();
+        assert!(db.assessment_exists(1, "cv1", 1, "aaaa").unwrap());
+        assert!(!db.assessment_exists(1, "cv1", 1, "bbbb").unwrap(), "instruction edits re-run");
+
+        // NULL hash = pre-workspace row, grandfathered under any hash.
+        db.upsert_assessment(1, "cv2", 1, 1, None, None, "mock", "{}").unwrap();
+        assert!(db.assessment_exists(1, "cv2", 1, "anything").unwrap());
     }
 
     #[test]

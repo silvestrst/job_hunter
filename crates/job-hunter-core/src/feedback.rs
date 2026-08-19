@@ -45,12 +45,10 @@ pub fn build_compaction_prompt(existing_digest: Option<&str>, items: &[FeedbackI
         _ => String::new(),
     };
     let lines: Vec<String> = items.iter().map(format_item).collect();
+    let pointer = crate::workspace::AgentTask::FeedbackCompact.instructions_pointer();
     format!(
-        "You maintain assessment guidance for a job-search assistant. The candidate has \
-         given feedback on past job assessments. Distill the existing guidance and the new \
-         feedback below into AT MOST 10 durable guidance rules, 200 words total maximum. \
-         Keep only lessons that transfer to future assessments; drop one-off remarks. \
-         Return only the rules as a markdown bullet list, no preamble.\n\n\
+        "Task: distill the candidate's assessment feedback below into durable guidance rules.\n\
+         {pointer}\n\n\
          {existing}## New feedback\n{}\n",
         lines.join("\n")
     )
@@ -92,6 +90,7 @@ mod tests {
         let prompt = build_compaction_prompt(Some("- old rule"), &items);
         assert!(prompt.contains("old rule"));
         assert!(prompt.contains("contract roles"));
-        assert!(prompt.contains("AT MOST 10"));
+        assert!(prompt.contains("`feedback-compact` skill"));
+        assert!(prompt.contains(".claude/skills/feedback-compact/SKILL.md"));
     }
 }

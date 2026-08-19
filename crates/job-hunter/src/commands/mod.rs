@@ -14,6 +14,7 @@ use job_hunter_core::config::Config;
 use job_hunter_core::db::{Assessment, Db, Score};
 use job_hunter_core::paths::Paths;
 use job_hunter_core::scoring;
+use job_hunter_core::workspace::AgentWorkspace;
 
 /// Everything a command needs: resolved paths, parsed config, open database.
 pub struct Ctx {
@@ -34,6 +35,14 @@ impl Ctx {
         let config = Config::load(&paths.config_file)?;
         let db = Db::open(&paths.db_file)?;
         Ok(Self { paths, config, db })
+    }
+
+    /// The agent workspace the LLM runs in, materializing any missing
+    /// instruction files from the built-in defaults (user edits are kept).
+    pub fn agent_workspace(&self) -> Result<AgentWorkspace> {
+        let dir = AgentWorkspace::resolve_dir(&self.config.agent, &self.paths);
+        let (ws, _created) = AgentWorkspace::ensure(dir)?;
+        Ok(ws)
     }
 }
 

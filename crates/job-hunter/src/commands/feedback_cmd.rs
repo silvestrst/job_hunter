@@ -52,7 +52,10 @@ pub fn run(args: FeedbackArgs) -> Result<()> {
         let existing = ctx.db.get_feedback_digest()?;
         let prompt = feedback::build_compaction_prompt(existing.as_deref(), &items);
         println!("Distilling {} feedback item(s) via the agent...", items.len());
-        let digest = AgentRunner::new(&ctx.config.agent).run_text(&prompt)?;
+        let workspace = ctx.agent_workspace()?;
+        let digest = AgentRunner::new(&ctx.config.agent)
+            .with_workspace(workspace.dir.clone())
+            .run_text(&prompt)?;
         if digest.trim().is_empty() {
             bail!("agent returned an empty digest - feedback left untouched");
         }

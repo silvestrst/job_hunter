@@ -6,17 +6,26 @@ use crate::assessment::schema::AssessmentFacts;
 use crate::config::{AgentConfig, AgentOutput};
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
 pub struct AgentRunner<'a> {
     config: &'a AgentConfig,
+    workspace_dir: Option<PathBuf>,
 }
 
 impl<'a> AgentRunner<'a> {
     pub fn new(config: &'a AgentConfig) -> Self {
-        Self { config }
+        Self { config, workspace_dir: None }
+    }
+
+    /// Run the agent with this directory as its cwd, so it picks up the
+    /// workspace's instruction files (AGENTS.md / CLAUDE.md / skills).
+    pub fn with_workspace(mut self, dir: PathBuf) -> Self {
+        self.workspace_dir = Some(dir);
+        self
     }
 
     /// Run the agent once and return its answer as plain text (envelope
@@ -81,6 +90,9 @@ impl<'a> AgentRunner<'a> {
             .stdin(if used_placeholder { Stdio::null() } else { Stdio::piped() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(dir) = &self.workspace_dir {
+            cmd.current_dir(dir);
+        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("cannot run agent command '{program}' - is it installed?"))?;
@@ -215,6 +227,7 @@ mod tests {
             output,
             timeout_secs: 10,
             retries: 1,
+            workspace_dir: None,
         }
     }
 
@@ -234,6 +247,7 @@ mod tests {
             output: AgentOutput::Text,
             timeout_secs: 10,
             retries: 0,
+            workspace_dir: None,
         };
         let out = AgentRunner::new(&config).run_text("X").unwrap();
         assert_eq!(out, "got:X");
@@ -247,9 +261,35 @@ mod tests {
             output: AgentOutput::Text,
             timeout_secs: 10,
             retries: 0,
+            workspace_dir: None,
         };
         let out = AgentRunner::new(&config).run_text("X").unwrap();
         assert_eq!(out, "model=claude-sonnet-5 prompt=X");
+    }
+
+    #[test]
+    fn workspace_sets_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = shell_agent("pwd", AgentOutput::Text);
+        let out = AgentRunner::new(&config)
+            .with_workspace(dir.path().to_path_buf())
+            .run_text("p")
+            .unwrap();
+        assert_eq!(
+            std::path::Path::new(&out).canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn no_workspace_keeps_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = shell_agent("pwd", AgentOutput::Text);
+        let out = AgentRunner::new(&config).run_text("p").unwrap();
+        assert_ne!(
+            std::path::Path::new(&out).canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]

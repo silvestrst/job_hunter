@@ -75,7 +75,11 @@ CREATE INDEX idx_assessments_job ON assessments(job_id, cv_hash, prompt_version)
 CREATE UNIQUE INDEX idx_jobs_title_company ON jobs(title_normalized, company_normalized)
   WHERE title_normalized IS NOT NULL AND company_normalized IS NOT NULL AND duplicate_of IS NULL;
 "#,
-    )])
+    ),
+    // Hash of the agent workspace instructions (AGENTS.md + task skill) in
+    // effect when the assessment ran. NULL on pre-workspace rows, which are
+    // grandfathered - see Db::assessment_exists.
+    M::up("ALTER TABLE assessments ADD COLUMN instructions_hash TEXT;")])
 }
 
 #[cfg(test)]

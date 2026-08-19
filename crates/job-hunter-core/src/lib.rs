@@ -9,6 +9,7 @@ pub mod paths;
 pub mod scoring;
 pub mod token;
 pub mod urlnorm;
+pub mod workspace;
 
 /// ISO-8601 UTC timestamp used for every created_at/updated_at column.
 pub fn now_utc() -> String {

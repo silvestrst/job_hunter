@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use job_hunter_core::config::{Config, DEFAULT_CONFIG_YAML};
 use job_hunter_core::paths::{expand_tilde, Paths};
 use job_hunter_core::token;
+use job_hunter_core::workspace::{AgentTask, AgentWorkspace, FileStatus};
 
 pub fn init(force: bool) -> Result<()> {
     let paths = Paths::resolve()?;
@@ -17,11 +18,23 @@ pub fn init(force: bool) -> Result<()> {
     std::fs::write(&paths.config_file, DEFAULT_CONFIG_YAML)
         .with_context(|| format!("cannot write {}", paths.config_file.display()))?;
     println!("Wrote {}", paths.config_file.display());
+
+    // Agent workspace: missing instruction files only; edits are never touched.
+    let (workspace, created) = AgentWorkspace::ensure(paths.agent_workspace_dir.clone())?;
+    for (rel, _) in workspace.file_status() {
+        if created.contains(&rel) {
+            println!("Wrote {}", workspace.dir.join(rel).display());
+        } else {
+            println!("Kept  {} (already exists)", workspace.dir.join(rel).display());
+        }
+    }
+
     println!("\nNext steps:");
     println!("  1. Edit resources.cv_path to point at your CV (markdown/plain text).");
     println!("  2. Adjust criteria to your preferences.");
-    println!("  3. `job-hunter config check` to validate.");
-    println!("  4. `job-hunter serve` and load the browser extension.");
+    println!("  3. Review the agent instructions in {}.", workspace.dir.display());
+    println!("  4. `job-hunter config check` to validate.");
+    println!("  5. `job-hunter serve` and load the browser extension.");
     Ok(())
 }
 
@@ -57,6 +70,25 @@ pub fn check() -> Result<()> {
         .collect();
     println!("agent:    {} (output: {:?})", resolved_command.join(" "), config.agent.output);
     println!("model:    {}", config.agent.model.as_deref().unwrap_or("(none - using agent CLI's own default)"));
+
+    // Workspace inspection is read-only: missing files are reported, not written.
+    let workspace = AgentWorkspace::open(AgentWorkspace::resolve_dir(&config.agent, &paths));
+    println!("workspace: {} (agent cwd)", workspace.dir.display());
+    let statuses = workspace.file_status();
+    for (rel, status) in &statuses {
+        let label = match status {
+            FileStatus::Default => "default",
+            FileStatus::Edited => "edited",
+            FileStatus::Missing => "missing (created on next use or `config init`)",
+        };
+        println!("  {rel:<42} {label}");
+    }
+    if statuses.iter().all(|(_, s)| *s != FileStatus::Missing) {
+        println!(
+            "  assess instructions hash: {} (a change re-runs affected assessments)",
+            workspace.instructions_hash(AgentTask::Assess)?
+        );
+    }
     println!("server:   http://127.0.0.1:{}", config.server.port);
     match token::load(&paths.api_token_file)? {
         Some(t) => println!("token:    {t}"),
