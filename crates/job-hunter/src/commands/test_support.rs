@@ -38,7 +38,7 @@ pub fn test_ctx_with_resources(dir: &Path, agent_command: &[String], extra_resou
     let config_yaml = format!(
         r#"
 resources:
-  cv_path: {cv}
+  experience_path: {experience}
 {extra_resources}
 agent:
   command: [{command}]
@@ -56,7 +56,7 @@ criteria:
     - {{fact: salary_max_gbp, weight: 3, target: 120000}}
     - {{fact: domain_familiarity, weight: 1}}
 "#,
-        cv = fixtures.join("sample-cv.md").display(),
+        experience = fixtures.join("sample-experience.md").display(),
         command = command_yaml.join(", "),
     );
     let config_file = dir.join("config.yaml");
@@ -69,7 +69,6 @@ criteria:
             data_dir: dir.to_path_buf(),
             db_file: dir.join("job_hunter.db"),
             api_token_file: dir.join("api_token"),
-            cv_digest_dir: dir.join("cv_digest"),
             agent_workspace_dir: dir.join("agent"),
             systemd_unit_file: dir.join("job-hunter.service"),
         },

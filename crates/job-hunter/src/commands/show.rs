@@ -1,7 +1,6 @@
 use super::{ensure_score, format_salary, job_label, Ctx};
 use anyhow::Result;
 use comfy_table::{presets, Table};
-use job_hunter_core::db::Assessment;
 use job_hunter_core::scoring::{FactValue, ScoreResult};
 
 fn fact_value_text(v: &FactValue) -> String {
@@ -16,53 +15,6 @@ fn fact_value_text(v: &FactValue) -> String {
         FactValue::Text(t) => t.clone(),
         FactValue::Missing => "missing".to_string(),
     }
-}
-
-/// The CV advice derived from this assessment, if `cv-advice` has been run.
-/// Keyed by assessment, so what is shown was always produced from the facts
-/// printed above it.
-fn print_cv_advice(ctx: &Ctx, assessment: &Assessment, id: i64) -> Result<()> {
-    let Some(row) = ctx.db.cv_advice_for_assessment(assessment.id)? else {
-        println!("\n## CV advice\n  None yet - run `job-hunter cv-advice {id}`.");
-        return Ok(());
-    };
-    let advice = row.advice()?;
-    println!("\n## CV advice ({})", row.created_at);
-    if let Some(positioning) = &advice.positioning {
-        println!("  {positioning}");
-    }
-    for rewrite in &advice.rewrites {
-        println!("\n  [{}]", rewrite.section);
-        if let Some(current) = &rewrite.current {
-            println!("    now: {current}");
-        }
-        println!("    new: {}", rewrite.suggested);
-        if let Some(why) = &rewrite.why {
-            println!("    why: {why}");
-        }
-    }
-    if !advice.emphasise.is_empty() || !advice.deemphasise.is_empty() {
-        println!();
-        for item in &advice.emphasise {
-            println!("  ↑ {item}");
-        }
-        for item in &advice.deemphasise {
-            println!("  ↓ {item}");
-        }
-    }
-    for gap in &advice.gaps {
-        match &gap.how_to_address {
-            Some(how) => println!("  ! {} - {how}", gap.gap),
-            None => println!("  ! {}", gap.gap),
-        }
-    }
-    if !advice.keywords.is_empty() {
-        println!("  keywords the posting uses and the CV doesn't: {}", advice.keywords.join(", "));
-    }
-    if let Some(notes) = &advice.notes {
-        println!("  notes: {notes}");
-    }
-    Ok(())
 }
 
 pub fn run(id: i64) -> Result<()> {
@@ -99,8 +51,8 @@ pub fn run(id: i64) -> Result<()> {
                 .as_deref()
                 .map(|h| format!(" / instr {h}"))
                 .unwrap_or_default();
-            println!("\n## Assessment (cv {} / prompt v{}{instr}, {})",
-                &assessment.cv_hash[..8.min(assessment.cv_hash.len())],
+            println!("\n## Assessment (experience {} / prompt v{}{instr}, {})",
+                &assessment.experience_hash[..8.min(assessment.experience_hash.len())],
                 assessment.prompt_version,
                 assessment.created_at
             );
@@ -178,8 +130,6 @@ pub fn run(id: i64) -> Result<()> {
                 }
                 println!("{table}");
             }
-
-            print_cv_advice(&ctx, &assessment, id)?;
         }
     }
 

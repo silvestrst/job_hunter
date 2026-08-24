@@ -27,19 +27,25 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourcesConfig {
-    /// Path to the CV as markdown/plain text (`~/` is expanded).
-    pub cv_path: String,
-    /// Optional: detail on experience and skills the CV has no room for -
-    /// project scope, depth, context. Read as further evidence about the
-    /// candidate, exactly like the CV itself.
-    #[serde(default)]
-    pub background_path: Option<String>,
+    /// Everything the agent should know about the candidate - experience,
+    /// skills, project scope and context - as one markdown/plain text file
+    /// (`~/` is expanded). Deliberately not "the CV": nothing here is
+    /// summarised or truncated before it reaches a prompt, so write the full
+    /// detail rather than a document formatted to fit a page.
+    pub experience_path: String,
     /// Optional: what the candidate wants from a role, in their own words.
     /// Deliberately advisory - it shapes the agent's prose (flags, notes,
     /// suggestions) but never the extracted facts or the fit numbers, because
     /// hard preferences belong in `criteria`, which is scored without an LLM.
     #[serde(default)]
     pub preferences_path: Option<String>,
+    /// The one size limit, and a safety guard rather than a token lever: an
+    /// input file bigger than this is refused unread, so a mistyped path
+    /// pointing at something huge can never reach a prompt or a bill. Checked
+    /// against the file's size on disk before it is opened - for markdown
+    /// that tracks its character count to within a fraction of a percent.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,17 +92,10 @@ pub enum AgentOutput {
 pub struct AssessmentConfig {
     #[serde(default = "default_prompt_version")]
     pub prompt_version: i64,
+    /// Job postings arrive from the browser extension, not from a file the
+    /// user controls, so this stays a truncation budget rather than a refusal.
     #[serde(default = "default_max_job_chars")]
     pub max_job_chars: usize,
-    /// A CV at or under this many characters is embedded verbatim (lossless).
-    #[serde(default = "default_cv_verbatim_max_chars")]
-    pub cv_verbatim_max_chars: usize,
-    /// Word budget for the one-off distillation of a CV over the verbatim limit.
-    #[serde(default = "default_cv_digest_max_words")]
-    pub cv_digest_max_words: usize,
-    /// Budget for each supplementary profile document in a prompt.
-    #[serde(default = "default_max_profile_chars")]
-    pub max_profile_chars: usize,
     #[serde(default = "default_feedback_recent_n")]
     pub feedback_recent_n: usize,
 }
@@ -187,14 +186,10 @@ fn default_prompt_version() -> i64 {
 fn default_max_job_chars() -> usize {
     12_000
 }
-fn default_cv_verbatim_max_chars() -> usize {
-    6_000
-}
-fn default_cv_digest_max_words() -> usize {
-    800
-}
-fn default_max_profile_chars() -> usize {
-    6_000
+/// ~8000 characters of markdown. Comfortably above a thorough experience
+/// document, far below anything you would reference by accident.
+fn default_max_file_bytes() -> u64 {
+    8_192
 }
 fn default_feedback_recent_n() -> usize {
     10
@@ -222,9 +217,6 @@ impl Default for AssessmentConfig {
         Self {
             prompt_version: default_prompt_version(),
             max_job_chars: default_max_job_chars(),
-            cv_verbatim_max_chars: default_cv_verbatim_max_chars(),
-            cv_digest_max_words: default_cv_digest_max_words(),
-            max_profile_chars: default_max_profile_chars(),
             feedback_recent_n: default_feedback_recent_n(),
         }
     }
@@ -289,18 +281,19 @@ server:
   port: 7877                       # ingest server; binds 127.0.0.1 only
 
 resources:
-  # Your CV as markdown or plain text (export it once from your source doc).
-  cv_path: ~/Documents/cv.md
-  # Optional extras, also markdown/plain text. Both travel with every
-  # assessment and are the raw material for `job-hunter cv-advice`.
-  # Depth the CV has no room for - project scope, context, skills detail.
-  # Read as further evidence about you, exactly like the CV itself:
-  # background_path: ~/Documents/background.md
-  # What you want from your next role, in your own words. Advisory only: it
-  # shapes the agent's flags, notes and suggestions, never the extracted
-  # facts or the fit numbers. Hard preferences belong in `criteria` below,
-  # which is scored without an LLM:
+  # Everything about you, as one markdown or plain text file: roles, projects,
+  # scope, skills, context. Not a formatted CV - nothing here is summarised or
+  # cut before it reaches the agent, so write the full detail.
+  experience_path: ~/Documents/experience.md
+  # Optional, also markdown/plain text. What you want from your next role, in
+  # your own words. Advisory only: it shapes the agent's flags, notes and
+  # suggestions, never the extracted facts or the fit numbers. Hard
+  # preferences belong in `criteria` below, which is scored without an LLM:
   # preferences_path: ~/Documents/preferences.md
+  # Safety guard on the files above: anything larger is refused unread, so a
+  # mistyped path can't put something huge in a prompt. ~8000 characters of
+  # markdown; raise it if your experience file legitimately outgrows it.
+  max_file_bytes: 8192
 
 agent:
   # LLM agent command as an argv array (no shell). If an element contains
@@ -326,9 +319,6 @@ agent:
 assessment:
   prompt_version: 1                # bump to force re-assessment of every job
   max_job_chars: 12000             # job text is truncated beyond this
-  cv_verbatim_max_chars: 6000      # CV at or under this is embedded verbatim (lossless)
-  cv_digest_max_words: 800         # word budget when a longer CV is distilled once
-  max_profile_chars: 6000          # background/preferences docs truncated beyond this
   feedback_recent_n: 10            # recent feedback items included in prompts
 
 criteria:
@@ -368,7 +358,7 @@ mod tests {
     #[test]
     fn omitted_agent_section_defaults_to_pinned_model() {
         let config: Config = serde_yaml::from_str(
-            "resources:\n  cv_path: ~/cv.md\n",
+            "resources:\n  experience_path: ~/experience.md\n",
         )
         .unwrap();
         config.validate().unwrap();
@@ -377,18 +367,28 @@ mod tests {
     }
 
     #[test]
-    fn supplementary_profile_paths_are_optional() {
+    fn preferences_path_is_optional() {
         let config: Config = serde_yaml::from_str(DEFAULT_CONFIG_YAML).unwrap();
-        assert!(config.resources.background_path.is_none());
         assert!(config.resources.preferences_path.is_none());
 
         let yaml = DEFAULT_CONFIG_YAML
-            .replace("  # background_path: ~/Documents/background.md", "  background_path: ~/bg.md")
             .replace("  # preferences_path: ~/Documents/preferences.md", "  preferences_path: ~/want.md");
         let config: Config = serde_yaml::from_str(&yaml).unwrap();
         config.validate().unwrap();
-        assert_eq!(config.resources.background_path.as_deref(), Some("~/bg.md"));
         assert_eq!(config.resources.preferences_path.as_deref(), Some("~/want.md"));
+    }
+
+    #[test]
+    fn max_file_bytes_defaults_when_omitted() {
+        // The guard must exist even in a config that predates it, otherwise
+        // upgrading would silently leave input files unchecked.
+        let config: Config = serde_yaml::from_str(
+            "resources:\n  experience_path: ~/experience.md\n",
+        )
+        .unwrap();
+        assert_eq!(config.resources.max_file_bytes, 8_192);
+        let config: Config = serde_yaml::from_str(DEFAULT_CONFIG_YAML).unwrap();
+        assert_eq!(config.resources.max_file_bytes, 8_192);
     }
 
     #[test]

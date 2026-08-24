@@ -1,7 +1,8 @@
 # job-hunter
 
 A personal job-search tool. Save postings from your browser with one click, have an LLM agent
-assess each one against your CV, and get a ranked list driven by criteria *you* control —
+assess each one against your experience, and get a ranked list driven by criteria *you*
+control —
 where changing your criteria never costs another LLM call.
 
 ```
@@ -27,18 +28,23 @@ want in a job.**
 **Layer 1 — LLM-assessed fundamental data.** One agent call per job produces
 *criteria-independent facts*: extracted fields (title, company, salary range with currency
 and period, remote/hybrid/onsite, employment type, seniority, tech stack, …) plus
-CV-relative fit measures (per-skill evidence from your CV, seniority fit,
+fit measures relative to your experience (per-skill evidence, seniority fit,
 `overall_cv_match`, red/green flags). The agent is explicitly forbidden from judging
 against preferences — "salary is good" is banned; "£90k–£110k GBP/year" is a fact. This
 JSON is preserved verbatim in the `assessments` table. It is the expensive artifact, and
 it never goes stale when your preferences change.
 
-What you tell it about yourself is three documents, all optional except the first:
-your **CV**, a **background** file with the depth a CV has no room for, and a
-**preferences** file saying what you want from a role. The first two are evidence and
-feed the fit measures. The third deliberately does *not*: preferences may only shape the
-agent's prose (flags, notes, suggestions), never an extracted fact or a fit number,
-because ranking by what you want is layer 2's job and costs nothing to change.
+What you tell it about yourself is two documents. Your **experience** file is the
+required one and the whole evidence base: roles, projects, scope, skills, context. It is
+not a CV — nothing is summarised or truncated on the way into a prompt, so it is written
+to be complete rather than to fit a page. The optional **preferences** file says what you
+want from a role, and deliberately does *not* feed the fit measures: preferences may only
+shape the agent's prose (flags, notes, suggestions), never an extracted fact or a fit
+number, because ranking by what you want is layer 2's job and costs nothing to change.
+
+Both files are size-checked before they are opened — see `resources.max_file_bytes`
+below. That guard is the only limit on the way in, and it exists so a mistyped path
+cannot put something huge in a prompt, not to shave tokens.
 
 **Layer 2 — pure-logic filtering and weighting.** Your YAML `criteria:` section defines
 hard filters ("salary ≥ £85k", "remote or hybrid") and weighted soft criteria
@@ -54,8 +60,8 @@ Every cached value is keyed by a hash of the thing it depends on:
 | You change...            | Key that changes                | What happens                                     |
 |--------------------------|---------------------------------|--------------------------------------------------|
 | criteria in the YAML     | `criteria_hash` (16-hex)        | scores recompute instantly, **zero LLM calls**   |
-| your CV file             | `cv_hash` (sha256 of the file)  | `assess` re-runs jobs against the new CV         |
-| background / preferences | `profile_hash` (16-hex)         | `assess` re-runs jobs against the new profile    |
+| your experience file     | `experience_hash` (sha256)      | `assess` re-runs jobs against the new evidence   |
+| your preferences file    | `preferences_hash` (16-hex)     | `assess` re-runs jobs against the new profile    |
 | the prompt design        | `assessment.prompt_version`     | bump it in the config to force re-assessment     |
 | your mind about a job    | nothing                         | record `feedback`; future assessments improve    |
 
@@ -93,12 +99,13 @@ cargo build --release            # -> target/release/job-hunter
 
 # 2. Create and edit the config
 job-hunter config init           # writes ~/.config/job-hunter/config.yaml
-$EDITOR ~/.config/job-hunter/config.yaml   # set resources.cv_path, tune criteria
+$EDITOR ~/.config/job-hunter/config.yaml   # set resources.experience_path, tune criteria
 job-hunter config check          # validates, prints resolved paths + criteria hash
 
-# 3. Export your CV as markdown/plain text (once)
-#    Google Docs / Word: File -> Download -> Markdown or Plain text.
-#    Point resources.cv_path at it. PDFs are not supported by design.
+# 3. Write your experience file as markdown/plain text (once)
+#    Starting from a CV? Google Docs / Word: File -> Download -> Markdown or
+#    Plain text, then add the detail the CV had no room for. PDFs are not
+#    supported by design. Point resources.experience_path at it.
 
 # 4. Build and load the extension (once)
 cd extension && npm install && npm run build
@@ -118,14 +125,11 @@ job-hunter install-service --now # systemd user service; survives reboots
 2. When you have a batch: `job-hunter assess` (this is the only step that spends tokens).
 3. `job-hunter jobs` — ranked table of what's worth applying to.
 4. `job-hunter show 12` — why it scored what it scored: facts, filter results, per-criterion points.
-5. About to apply? `job-hunter cv-advice 12` — the agent reads your CV, your background,
-   the stored assessment and the posting, and returns paste-ready rewrites, what to lead
-   with, the gaps to preempt and the keywords the posting uses that your CV doesn't.
-   `job-hunter show 12` prints it under the score.
-6. Apply: `job-hunter status 12 applied --note "tailored CV v3"`.
-7. Update as things move: `status 12 progressing`, `status 12 rejected`, `status 7 dismissed`.
-8. Disagree with an assessment? `job-hunter feedback 12 "overall match is too high - I have no C++ and it's core here"`. Future assessments see it.
-9. Preferences changed? Edit `criteria:` in the YAML, run `job-hunter rescore` — instant re-ranking, deltas shown, no tokens.
+5. Apply: `job-hunter status 12 applied --note "tailored CV v3"`. (`show` includes the
+   assessment's own `suggestions` — what to foreground for that posting, gaps to preempt.)
+6. Update as things move: `status 12 progressing`, `status 12 rejected`, `status 7 dismissed`.
+7. Disagree with an assessment? `job-hunter feedback 12 "overall match is too high - I have no C++ and it's core here"`. Future assessments see it.
+8. Preferences changed? Edit `criteria:` in the YAML, run `job-hunter rescore` — instant re-ranking, deltas shown, no tokens.
 
 ## Command reference
 
@@ -135,11 +139,9 @@ job-hunter install-service --now # systemd user service; survives reboots
 | `jobs --all` / `--applied` / `--rejected` / `--progressing` / `--status <s>` | Other status views. |
 | `jobs --include-filtered` | Also show hard-filter failures (marked ✗). |
 | `jobs --min-score 70 --limit 10` | Trim the list. |
-| `show <id>` | Full detail: extraction, fit, score breakdown tables, CV advice, duplicate URLs, history, feedback. |
+| `show <id>` | Full detail: extraction, fit, score breakdown tables, duplicate URLs, history, feedback. |
 | `status <id> <status> [--note "..."]` | Transition with audit trail. |
 | `assess [ids...] [--force]` | Run the LLM for jobs lacking a current assessment. `--force` re-runs (e.g. after feedback). |
-| `cv-advice <ids...> [--force]` | Per-job CV restructuring advice from the CV, background, stored assessment and posting. One LLM call per job; stored and shown by `show`. |
-| `cv-advice --all` | Same for every assessed job without current advice (explicit, because it is a call per job). |
 | `rescore` | Recompute every score under current criteria. Instant; shows Δ vs previous criteria. |
 | `feedback <id> "text"` | Job-linked feedback for the agent. |
 | `feedback --general "text"` | Feedback not tied to one job. |
@@ -162,16 +164,22 @@ server:
   port: 7877                  # ingest server port; always binds 127.0.0.1 only
 
 resources:
-  cv_path: ~/cv.md            # your CV as markdown/plain text (~ expands)
-  # Both optional, same formats, both sent with every assessment and used by
-  # `cv-advice`. A configured-but-unreadable path is an error, not a silent skip.
-  background_path: ~/background.md   # depth the CV has no room for - project scope,
-                              # context, skills detail. Read as evidence, exactly
-                              # like the CV itself.
-  preferences_path: ~/want.md # what you want from a role, in your own words.
-                              # Advisory only: shapes the agent's flags, notes and
-                              # suggestions, never an extracted fact or a fit number.
-                              # Hard preferences belong in `criteria` below.
+  experience_path: ~/experience.md   # everything about you, as markdown/plain
+                              # text (~ expands): roles, projects, scope, skills,
+                              # context. Not a CV - it reaches the agent whole,
+                              # so write the full detail. Required.
+  preferences_path: ~/want.md # optional: what you want from a role, in your own
+                              # words. Advisory only: shapes the agent's flags,
+                              # notes and suggestions, never an extracted fact or
+                              # a fit number. Hard preferences belong in
+                              # `criteria` below. A configured-but-unreadable
+                              # path is an error, not a silent skip.
+  max_file_bytes: 8192        # the one size limit, and a safety guard rather than
+                              # a token lever: any input file bigger than this is
+                              # refused UNREAD, so a mistyped path can never put
+                              # something huge in a prompt. Checked against size on
+                              # disk, which for markdown is within a fraction of a
+                              # percent of the character count. ~8000 characters.
 
 agent:                        # LLM-agnostic invocation
   command: ["claude", "-p", "--output-format", "json", "--model", "{model}"]
@@ -191,16 +199,10 @@ agent:                        # LLM-agnostic invocation
 
 assessment:
   prompt_version: 1           # bump to force re-assessment of everything
-  max_job_chars: 12000        # job text truncated beyond this (token lever)
-  cv_verbatim_max_chars: 6000 # CV at/below this: embedded verbatim = lossless.
-                              # Above: distilled ONCE by the agent (structure-
-                              # preserving), cached, and the cache file at
-                              # ~/.local/share/job-hunter/cv_digest/<hash>.txt
-                              # is plain text you can review and hand-edit.
-  cv_digest_max_words: 800    # word budget for that one-off distillation
-  max_profile_chars: 6000     # background/preferences truncated beyond this, each.
-                              # `cv-advice` still gets the CV verbatim - you can't
-                              # advise on restructuring a digest.
+  max_job_chars: 12000        # job text truncated beyond this (token lever).
+                              # Postings arrive from the extension, not from a
+                              # file you control, so this one truncates rather
+                              # than refusing - see resources.max_file_bytes.
   feedback_recent_n: 10       # recent feedback items included per prompt
 
 criteria:                     # LAYER 2 - edits here never re-run the LLM
@@ -238,13 +240,11 @@ instructions as standard conventions:
   AGENTS.md                                  # source of truth: role, conventions, task index
   CLAUDE.md                                  # just "@AGENTS.md" (Claude Code import)
   .claude/skills/assess/SKILL.md             # per-task instructions (Agent Skills format)
-  .claude/skills/cv-advice/SKILL.md
-  .claude/skills/cv-digest/SKILL.md
   .claude/skills/feedback-compact/SKILL.md
 ```
 
 Each prompt carries only what changes per call — a task pointer, the JSON contract, the
-CV, the feedback digest, and the job text. The instruction prose lives in these files:
+experience, the feedback digest, and the job text. The instruction prose lives in these files:
 edit them freely to tune behaviour, no rebuild needed. Files are created from built-in
 defaults when missing (`config init` or first use) and never overwritten once present;
 to reset one, delete it and rerun `config init`. `config check` shows which files you've
@@ -253,9 +253,7 @@ edited versus the shipped defaults.
 The instructions in effect (AGENTS.md + the task's SKILL.md) are hashed into every
 assessment, so editing them re-runs affected jobs on the next `assess` — exactly like a
 `prompt_version` bump. Assessments made before this mechanism existed are grandfathered
-and never silently re-run. One carve-out: an already-cached CV digest is keyed by CV
-content only, so editing `cv-digest/SKILL.md` won't regenerate it — delete the cache
-file under `~/.local/share/job-hunter/cv_digest/` to force that.
+and never silently re-run.
 
 ## Swapping the LLM agent
 
@@ -288,16 +286,15 @@ model the CLI defaults to.
 | Costs tokens | Free forever |
 |---|---|
 | `assess` (one call per job) | `jobs`, `show`, `rescore` |
-| `cv-advice` (one call per job, only when you ask) | reading advice again |
-| CV distillation (once, only if CV > `cv_verbatim_max_chars`) | any criteria edit + re-rank |
-| `feedback --compact` (deliberate, manual) | recording feedback, status changes |
-| editing agent workspace instructions (re-runs affected jobs on next `assess`) | |
+| `feedback --compact` (deliberate, manual) | any criteria edit + re-rank |
+| editing agent workspace instructions (re-runs affected jobs on next `assess`) | recording feedback, status changes |
 
 Levers: `agent.model` is the biggest one - pick the cheapest model that still extracts
-facts reliably; `max_job_chars` bounds the biggest prompt section; `cv_verbatim_max_chars`
-/ `cv_digest_max_words` bound the CV section; `feedback_recent_n` bounds the feedback
-section; the single-pass design does extraction *and* fit in one call; duplicates are
-skipped by `assess`.
+facts reliably; `max_job_chars` bounds the biggest prompt section; `feedback_recent_n`
+bounds the feedback section; the single-pass design does extraction *and* fit in one
+call; duplicates are skipped by `assess`. Your experience file is *not* a lever — it goes
+in whole, every time, by design: it is the one input where losing detail costs accuracy
+on every job. `resources.max_file_bytes` bounds it, but as a safety guard, not a budget.
 
 ## The feedback loop
 
@@ -311,25 +308,22 @@ durable rules, keeping prompt overhead flat while retaining the lessons.
 Feedback deliberately does **not** invalidate existing assessments (that would burn
 tokens). It shapes future ones; `assess <id> --force` retro-applies it where you care.
 
-## Tailoring the CV
+## The size guard
 
-`cv-advice <id>` is a separate command on purpose. `assess` answers *is this worth
-applying to*, runs over batches, and produces the facts scoring consumes. This answers
-*how do I present myself to this one*, so you pay for it only on the jobs you have
-decided to pursue.
+One number, `resources.max_file_bytes`, applies to every file you point the config at.
+It is a safety guard, not a token budget: a file over it is refused **unread**, with an
+error naming the path, both numbers and both remedies. The check is against the file's
+size on disk, so nothing large is ever loaded to find out it was too large — and for
+markdown, bytes track characters to within a fraction of a percent.
 
-It receives your CV **verbatim** (never the digest — you cannot advise on restructuring a
-document you were only shown a summary of), your background and preferences, the stored
-assessment facts for that job, and the posting text. It returns paste-ready rewrites
-naming real CV sections, what to lead with and what to cut, the gaps worth preempting,
-and the exact terms the posting uses that your CV doesn't. The shipped skill forbids
-inventing experience: every suggestion has to trace back to something in your CV or your
-background file, and a gap gets an honest way to bridge it rather than a way to hide it.
+The failure it exists to catch is a mistyped or stale path — pointing `experience_path`
+at a directory export, a database dump, or last year's 200-page notes file — where the
+cost of finding out late is a broken prompt and a bill. `job-hunter config check` reports
+each input file's size against the limit, so you can see the headroom before an `assess`
+run rather than during one.
 
-Advice is stored against the *assessment* it was derived from, not the job. Re-assessing
-a job replaces its facts and drops the advice with them, so `show` can never print advice
-written against facts that no longer exist. Editing `cv-advice/SKILL.md` invalidates it
-the same way instruction edits invalidate assessments.
+Nothing is truncated or summarised after the check passes. That is the trade: the guard
+is strict precisely so everything inside it can travel whole.
 
 ## Troubleshooting
 
@@ -363,19 +357,19 @@ curl -s -X POST http://127.0.0.1:7877/api/jobs \
 ```
 
 `fixtures/` contains mock agents (`mock-agent.sh`, `-flaky`, `-fail`) that emit canned
-Claude-style envelopes, sample payloads, canned facts, and a sample CV — the whole
+Claude-style envelopes, sample payloads, canned facts, and a sample experience file — the whole
 pipeline is testable offline; the only step that ever needs a real LLM is a final smoke
 test with your actual agent.
 
 ### Repository layout
 
 ```
-crates/job-hunter-core/   library: config, db, ingest, urlnorm, profile, assessment
-                          and advice (schema+prompt each), agent runner,
+crates/job-hunter-core/   library: config, db, ingest, urlnorm, profile,
+                          assessment (schema+prompt), agent runner, workspace,
                           scoring, feedback
 crates/job-hunter/        binary: clap CLI, axum server
 extension/                Chrome MV3 extension (TypeScript, esbuild)
-fixtures/                 mock agents, payloads, facts, sample CV
+fixtures/                 mock agents, payloads, facts, sample experience file
 ```
 
 ## Stage 2 roadmap

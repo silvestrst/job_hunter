@@ -15,8 +15,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTask {
     Assess,
-    CvAdvice,
-    CvDigest,
     FeedbackCompact,
 }
 
@@ -24,8 +22,6 @@ impl AgentTask {
     pub fn skill_name(&self) -> &'static str {
         match self {
             AgentTask::Assess => "assess",
-            AgentTask::CvAdvice => "cv-advice",
-            AgentTask::CvDigest => "cv-digest",
             AgentTask::FeedbackCompact => "feedback-compact",
         }
     }
@@ -58,14 +54,6 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
     (
         ".claude/skills/assess/SKILL.md",
         include_str!("../assets/agent/.claude/skills/assess/SKILL.md"),
-    ),
-    (
-        ".claude/skills/cv-advice/SKILL.md",
-        include_str!("../assets/agent/.claude/skills/cv-advice/SKILL.md"),
-    ),
-    (
-        ".claude/skills/cv-digest/SKILL.md",
-        include_str!("../assets/agent/.claude/skills/cv-digest/SKILL.md"),
     ),
     (
         ".claude/skills/feedback-compact/SKILL.md",
@@ -210,9 +198,9 @@ mod tests {
     fn pointer_names_the_skill_and_gives_its_path() {
         // One line, two vocabularies: skill-aware agents match the name they
         // discovered in the workspace, plain argv agents read the path.
-        let pointer = AgentTask::CvDigest.instructions_pointer();
-        assert!(pointer.contains("`cv-digest` skill"));
-        assert!(pointer.contains(".claude/skills/cv-digest/SKILL.md"));
+        let pointer = AgentTask::FeedbackCompact.instructions_pointer();
+        assert!(pointer.contains("`feedback-compact` skill"));
+        assert!(pointer.contains(".claude/skills/feedback-compact/SKILL.md"));
         assert!(pointer.contains("AGENTS.md"));
         assert!(!pointer.contains('\n'), "the pointer is one prompt line");
     }
@@ -266,20 +254,11 @@ mod tests {
         // any scored field.
         assert!(assess.contains("is preference, not evidence"));
 
-        let advice = embedded(".claude/skills/cv-advice/SKILL.md");
-        assert!(advice.contains("Never invent experience"));
-        assert!(advice.contains("paste-ready"));
-
-        let digest = embedded(".claude/skills/cv-digest/SKILL.md");
-        assert!(digest.contains("Preserve EVERY skill"));
-
         let compact = embedded(".claude/skills/feedback-compact/SKILL.md");
         assert!(compact.contains("AT MOST 10"));
 
         assert_eq!(embedded("CLAUDE.md").trim(), "@AGENTS.md");
-        for task in
-            [AgentTask::Assess, AgentTask::CvAdvice, AgentTask::CvDigest, AgentTask::FeedbackCompact]
-        {
+        for task in [AgentTask::Assess, AgentTask::FeedbackCompact] {
             assert!(embedded("AGENTS.md").contains(&task.skill_path()));
         }
     }

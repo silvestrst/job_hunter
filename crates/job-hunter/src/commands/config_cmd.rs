@@ -3,6 +3,7 @@ use job_hunter_core::config::{Config, DEFAULT_CONFIG_YAML};
 use job_hunter_core::paths::{expand_tilde, Paths};
 use job_hunter_core::token;
 use job_hunter_core::workspace::{AgentTask, AgentWorkspace, FileStatus};
+use std::path::PathBuf;
 
 pub fn init(force: bool) -> Result<()> {
     let paths = Paths::resolve()?;
@@ -30,7 +31,7 @@ pub fn init(force: bool) -> Result<()> {
     }
 
     println!("\nNext steps:");
-    println!("  1. Edit resources.cv_path to point at your CV (markdown/plain text).");
+    println!("  1. Edit resources.experience_path to point at your experience document.");
     println!("  2. Adjust criteria to your preferences.");
     println!("  3. Review the agent instructions in {}.", workspace.dir.display());
     println!("  4. `job-hunter config check` to validate.");
@@ -45,32 +46,29 @@ pub fn check() -> Result<()> {
     println!("config:   {}", paths.config_file.display());
     println!("database: {}", paths.db_file.display());
 
-    let cv_path = expand_tilde(&config.resources.cv_path);
-    match std::fs::read_to_string(&cv_path) {
-        Ok(text) => {
-            let chars = text.chars().count();
-            let mode = if chars <= config.assessment.cv_verbatim_max_chars {
-                "embedded verbatim (lossless)"
-            } else {
-                "will be distilled once (see assessment.cv_digest_max_words)"
-            };
-            println!("cv:       {} ({chars} chars - {mode})", cv_path.display());
-        }
-        Err(e) => println!("cv:       {} - NOT READABLE: {e}", cv_path.display()),
+    // Every configured input file, checked the way `assess` will check it:
+    // size on disk against the guard, before anything is opened. A typo'd
+    // path is worth catching here rather than at the next `assess`.
+    let limit = config.resources.max_file_bytes;
+    let mut inputs: Vec<(&str, PathBuf)> =
+        vec![("experience:", expand_tilde(&config.resources.experience_path))];
+    if let Some(path) = &config.resources.preferences_path {
+        inputs.push(("wants:", expand_tilde(path)));
     }
-    // The supplements travel with every assessment, so a typo'd path is worth
-    // catching here rather than at the next `assess`.
-    for (label, configured) in [
-        ("background:", config.resources.background_path.as_deref()),
-        ("wants:", config.resources.preferences_path.as_deref()),
-    ] {
-        let Some(path) = configured else { continue };
-        let expanded = expand_tilde(path);
-        match std::fs::read_to_string(&expanded) {
-            Ok(text) => {
-                println!("  + {label:<11} {} ({} chars)", expanded.display(), text.chars().count())
+    for (label, path) in inputs {
+        match std::fs::metadata(&path) {
+            Ok(meta) if !meta.is_file() => {
+                println!("{label:<11} {} - NOT A FILE", path.display())
             }
-            Err(e) => println!("  + {label:<11} {} - NOT READABLE: {e}", expanded.display()),
+            Ok(meta) if meta.len() > limit => println!(
+                "{label:<11} {} - TOO BIG: {} bytes, over the {limit}-byte limit",
+                path.display(),
+                meta.len()
+            ),
+            Ok(meta) => {
+                println!("{label:<11} {} ({} of {limit} bytes)", path.display(), meta.len())
+            }
+            Err(e) => println!("{label:<11} {} - NOT READABLE: {e}", path.display()),
         }
     }
 

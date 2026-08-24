@@ -7,7 +7,6 @@ pub struct Paths {
     pub data_dir: PathBuf,
     pub db_file: PathBuf,
     pub api_token_file: PathBuf,
-    pub cv_digest_dir: PathBuf,
     /// Default agent workspace (instruction files); user-editable, so it
     /// lives with the config rather than the data.
     pub agent_workspace_dir: PathBuf,
@@ -25,7 +24,6 @@ impl Paths {
             config_file: config_dir.join("config.yaml"),
             db_file: data_dir.join("job_hunter.db"),
             api_token_file: data_dir.join("api_token"),
-            cv_digest_dir: data_dir.join("cv_digest"),
             agent_workspace_dir: config_dir.join("agent"),
             systemd_unit_file: base
                 .home_dir()

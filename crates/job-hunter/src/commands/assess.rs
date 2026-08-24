@@ -23,52 +23,13 @@ pub struct AssessArgs {
     pub force: bool,
 }
 
-/// CV text embedded in prompts: verbatim when small (lossless), otherwise a
-/// cached one-off distillation keyed by CV hash. The cache file is plain text
-/// the user can review and hand-edit.
-fn cv_for_prompt(ctx: &Ctx, runner: &AgentRunner, cv_text: &str, cv_hash: &str) -> Result<String> {
-    if cv_text.chars().count() <= ctx.config.assessment.cv_verbatim_max_chars {
-        return Ok(cv_text.to_string());
-    }
-    let cache = ctx.paths.cv_digest_dir.join(format!("{cv_hash}.txt"));
-    if let Ok(cached) = std::fs::read_to_string(&cache) {
-        if !cached.trim().is_empty() {
-            return Ok(cached.trim().to_string());
-        }
-    }
-    println!(
-        "CV exceeds {} chars - distilling once via the agent (cached at {})...",
-        ctx.config.assessment.cv_verbatim_max_chars,
-        cache.display()
-    );
-    let digest = runner.run_text(&prompt::build_cv_digest_prompt(
-        cv_text,
-        ctx.config.assessment.cv_digest_max_words,
-    ))?;
-    if digest.trim().is_empty() {
-        bail!("agent returned an empty CV digest");
-    }
-    std::fs::create_dir_all(&ctx.paths.cv_digest_dir)?;
-    std::fs::write(&cache, format!("{}\n", digest.trim()))?;
-    println!("CV digest cached - review and hand-edit it if anything important was dropped.");
-    Ok(digest.trim().to_string())
-}
-
-/// ", +background +preferences" - names the supplementary documents in play,
-/// so a prompt that grew is visible in the run header rather than only in the
+/// ", +preferences" - says whether the optional document is in play, so a
+/// prompt that grew is visible in the run header rather than only in the
 /// re-assessment it triggers.
-pub fn profile_summary(profile: &Profile) -> String {
-    let mut parts = Vec::new();
-    if profile.background.is_some() {
-        parts.push("+background");
-    }
-    if profile.preferences.is_some() {
-        parts.push("+preferences");
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(", profile {}", parts.join(" "))
+fn profile_summary(profile: &Profile) -> String {
+    match profile.preferences {
+        Some(_) => ", +preferences".to_string(),
+        None => String::new(),
     }
 }
 
@@ -81,13 +42,13 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     let prompt_version = ctx.config.assessment.prompt_version;
 
     let profile = Profile::load(&ctx.config.resources)?;
-    let supplement_hash = profile.supplement_hash();
+    let preferences_hash = profile.preferences_hash();
 
     let workspace = ctx.agent_workspace()?;
     let instructions_hash = workspace.instructions_hash(AgentTask::Assess)?;
     let key = AssessmentKey {
-        cv_hash: &profile.cv_hash,
-        profile_hash: supplement_hash.as_deref(),
+        experience_hash: &profile.experience_hash,
+        preferences_hash: preferences_hash.as_deref(),
         prompt_version,
         instructions_hash: &instructions_hash,
     };
@@ -124,9 +85,6 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     }
 
     let runner = AgentRunner::new(&ctx.config.agent).with_workspace(workspace.dir.clone());
-    let cv_prompt_text = cv_for_prompt(ctx, &runner, &profile.cv_text, &profile.cv_hash)?;
-    let profile_prompt =
-        profile.for_prompt(cv_prompt_text, ctx.config.assessment.max_profile_chars);
     let feedback_digest = feedback::build_prompt_digest(&ctx.db, ctx.config.assessment.feedback_recent_n)?;
     let feedback_digest_hash = feedback_digest.as_deref().map(|d| sha256_hex(d.as_bytes())[..16].to_string());
     let agent_command = ctx.config.agent.command.join(" ");
@@ -141,7 +99,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
     let mut failures = 0usize;
     for (i, job) in targets.iter().enumerate() {
         let assessment_prompt = prompt::build_assessment_prompt(
-            &profile_prompt,
+            &profile,
             feedback_digest.as_deref(),
             &job.content_text,
             ctx.config.assessment.max_job_chars,
@@ -166,8 +124,8 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
 
         ctx.db.upsert_assessment(&NewAssessment {
             job_id: job.id,
-            cv_hash: &profile.cv_hash,
-            profile_hash: supplement_hash.as_deref(),
+            experience_hash: &profile.experience_hash,
+            preferences_hash: preferences_hash.as_deref(),
             prompt_version,
             schema_version: if facts.schema_version > 0 {
                 facts.schema_version
@@ -363,7 +321,7 @@ mod tests {
         let prompt = std::fs::read_to_string(&capture).unwrap();
         assert!(prompt.contains(".claude/skills/assess/SKILL.md"));
         assert!(prompt.contains("schema_version"));
-        assert!(prompt.contains("Test Candidate"), "CV embedded");
+        assert!(prompt.contains("Test Candidate"), "experience embedded");
         assert!(prompt.contains("Senior Rust Engineer"), "job text embedded");
         assert!(!prompt.contains("never collapse a stated range"));
     }
@@ -375,13 +333,14 @@ mod tests {
         let ctx = test_ctx(dir.path(), &mock_agent("mock-agent-fail.sh", None));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
 
-        let cv_text = std::fs::read_to_string(fixtures_dir().join("sample-cv.md")).unwrap();
-        let cv_hash = job_hunter_core::sha256_hex(cv_text.as_bytes());
+        let experience =
+            std::fs::read_to_string(fixtures_dir().join("sample-experience.md")).unwrap();
+        let experience_hash = job_hunter_core::sha256_hex(experience.as_bytes());
         ctx.db
             .upsert_assessment(&NewAssessment {
                 job_id: 1,
-                cv_hash: &cv_hash,
-                profile_hash: None,
+                experience_hash: &experience_hash,
+                preferences_hash: None,
                 prompt_version: 1,
                 schema_version: 1,
                 feedback_digest_hash: None,
@@ -396,49 +355,42 @@ mod tests {
     }
 
     #[test]
-    fn supplementary_documents_reach_the_prompt_and_rerun_on_edit() {
+    fn preferences_reach_the_prompt_and_rerun_on_edit() {
         let dir = tempfile::tempdir().unwrap();
         let capture = dir.path().join("captured-prompt");
         let command = mock_agent("mock-agent.sh", Some(&capture));
-        let background = dir.path().join("background.md");
         let preferences = dir.path().join("preferences.md");
-        std::fs::write(&background, "Rewrote the payments ledger end to end.").unwrap();
         std::fs::write(&preferences, "Remote only. No on-call rota.").unwrap();
-        let resources = format!(
-            "  background_path: {}\n  preferences_path: {}",
-            background.display(),
-            preferences.display()
-        );
+        let resources = format!("  preferences_path: {}", preferences.display());
         let ctx = test_ctx_with_resources(dir.path(), &command, &resources);
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
 
         assess_all(&ctx).unwrap();
         let prompt = std::fs::read_to_string(&capture).unwrap();
-        assert!(prompt.contains("Rewrote the payments ledger end to end."));
         assert!(prompt.contains("No on-call rota."));
-        let first = ctx.db.latest_assessment(1).unwrap().unwrap().profile_hash;
-        assert!(first.is_some(), "the supplements are hashed into the assessment");
+        let first = ctx.db.latest_assessment(1).unwrap().unwrap().preferences_hash;
+        assert!(first.is_some(), "preferences are hashed into the assessment");
 
         // Unchanged profile: nothing to do.
         assess_all(&ctx).unwrap();
         let prompt = std::fs::read_to_string(&capture).unwrap();
         assert_eq!(prompt.matches("\n----\n").count(), 1);
 
-        // Editing a supplement re-runs, exactly like editing the CV.
+        // Editing preferences re-runs, exactly like editing the experience.
         std::fs::write(&preferences, "Remote only. On-call is fine.").unwrap();
         assess_all(&ctx).unwrap();
         let prompt = std::fs::read_to_string(&capture).unwrap();
         assert_eq!(prompt.matches("\n----\n").count(), 2);
-        assert_ne!(ctx.db.latest_assessment(1).unwrap().unwrap().profile_hash, first);
+        assert_ne!(ctx.db.latest_assessment(1).unwrap().unwrap().preferences_hash, first);
     }
 
     #[test]
-    fn a_profile_with_no_supplements_is_not_rerun() {
+    fn a_profile_with_no_preferences_is_not_rerun() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", None));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         assess_all(&ctx).unwrap();
-        assert!(ctx.db.latest_assessment(1).unwrap().unwrap().profile_hash.is_none());
+        assert!(ctx.db.latest_assessment(1).unwrap().unwrap().preferences_hash.is_none());
 
         // A failing agent proves the second run makes no call at all.
         let mut ctx = ctx;

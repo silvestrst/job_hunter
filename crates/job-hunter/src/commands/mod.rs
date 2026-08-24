@@ -1,6 +1,5 @@
 pub mod assess;
 pub mod config_cmd;
-pub mod cv_advice;
 pub mod delete;
 pub mod feedback_cmd;
 pub mod jobs;
