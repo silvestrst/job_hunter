@@ -8,5 +8,6 @@
     "default_title": "Job Hunter"
   },
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["http://127.0.0.1/*"]
+  "host_permissions": ["http://127.0.0.1/*"],
+  "optional_host_permissions": ["<all_urls>"]
 }

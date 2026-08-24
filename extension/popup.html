@@ -16,6 +16,12 @@
     #dot.up { background: #2ea043; }
     #dot.down { background: #d1242f; }
     #server-state { font-size: 12px; color: #555; }
+    #capture { justify-content: space-between; }
+    #capture label { font-size: 12px; color: #555; }
+    #mode { flex: 1; font-size: 12px; padding: 4px; }
+    #selection-state { font-size: 12px; color: #555; margin-bottom: 10px; min-height: 16px; }
+    #selection-state.ok { color: #1a7f37; }
+    #selection-state.warn { color: #9a6700; }
     #save {
       width: 100%;
       padding: 10px;
@@ -43,6 +49,9 @@
     }
     details label { display: block; margin-top: 8px; }
     #settings-save { margin-top: 8px; padding: 4px 10px; font-size: 12px; }
+    #frames-label { margin-top: 12px; }
+    #frames { width: auto; margin: 0 4px 0 0; vertical-align: middle; }
+    .hint { display: block; color: #777; font-size: 11px; line-height: 1.4; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -50,6 +59,15 @@
     <div id="dot"></div>
     <span id="server-state">checking server...</span>
   </div>
+  <div class="row" id="capture">
+    <label for="mode">Capture</label>
+    <select id="mode">
+      <option value="auto">Selection, else the posting</option>
+      <option value="selection">Selection only</option>
+      <option value="page">Whole page</option>
+    </select>
+  </div>
+  <div id="selection-state"></div>
   <button id="save" disabled>Save this job</button>
   <div id="message"></div>
   <details id="settings">
@@ -61,6 +79,13 @@
       <input id="port" type="text" placeholder="7877" />
     </label>
     <button id="settings-save">Save settings</button>
+    <label id="frames-label">
+      <input id="frames" type="checkbox" />
+      Read postings inside embedded widgets
+      <span class="hint">Some career pages show the posting in an iframe from
+        another site (Greenhouse, Lever, Ashby). Reading those needs access to
+        all sites; without it only the outer page is captured.</span>
+    </label>
   </details>
   <script src="dist/popup.js"></script>
 </body>

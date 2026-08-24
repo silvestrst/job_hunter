@@ -1,35 +1,27 @@
-// Injected on demand when the user clicks Save. Extracts the readable text of
-// the current page with Readability (falling back to body text for pages it
-// can't parse) and hands the payload back to the popup via a runtime message.
+// Injected on demand when the user clicks Save, into every frame of the tab.
+// Captures this frame's best candidate (see `extract.ts`) and hands it to the
+// popup, which picks the winner across frames.
+//
+// The mode is read from storage rather than passed in: `executeScript` can
+// only pass arguments to an inline function, and this script has to ship as a
+// bundle because it carries Readability.
 
-import { Readability } from "@mozilla/readability";
+import { isCaptureMode, type CaptureMode } from "./capture";
+import { capture } from "./extract";
 
-interface ExtractedPage {
-  url: string;
-  title: string;
-  text: string;
-}
-
-function extract(): ExtractedPage {
-  let text = "";
-  let title = document.title;
+async function loadMode(): Promise<CaptureMode> {
   try {
-    // Readability mutates its input, so parse a clone.
-    const clone = document.cloneNode(true) as Document;
-    const article = new Readability(clone).parse();
-    if (article) {
-      text = article.textContent ?? "";
-      if (article.title) title = article.title;
-    }
+    const { mode } = await chrome.storage.local.get("mode");
+    if (isCaptureMode(mode)) return mode;
   } catch {
-    // Fall through to body text.
+    // Storage is unavailable in some sandboxed frames; auto is the default.
   }
-  const bodyText = document.body?.innerText ?? "";
-  // SPA job boards often defeat Readability; take whichever is richer.
-  if (bodyText.trim().length > text.trim().length) {
-    text = bodyText;
-  }
-  return { url: location.href, title, text: text.trim() };
+  return "auto";
 }
 
-chrome.runtime.sendMessage({ type: "job-hunter:extracted", payload: extract() });
+void (async () => {
+  const payload = capture(await loadMode());
+  // Rejects when the popup has already closed - nobody left to tell, which is
+  // not an error worth surfacing in the page's console.
+  void chrome.runtime.sendMessage({ type: "job-hunter:extracted", payload }).catch(() => {});
+})();
