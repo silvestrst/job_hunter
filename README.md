@@ -1,9 +1,9 @@
 # job-hunter
 
 A personal job-search tool. Save postings from your browser with one click, have an LLM agent
-assess each one against your experience, and get a ranked list driven by criteria *you*
-control —
-where changing your criteria never costs another LLM call.
+assess each one against your experience, and get a list ranked by how well you fit — filtered
+down to what you'd actually consider by rules *you* control, where changing those rules never
+costs another LLM call.
 
 ```
 Chrome extension ──POST──> local server (Rust, 127.0.0.1) ──> SQLite
@@ -15,7 +15,7 @@ job-hunter assess ──> prompt (profile + feedback + job text) ──> LLM age
                                               criteria-independent facts JSON
                                                     stored in `assessments`
                                                                 │
-job-hunter jobs / rescore ──> pure-Rust scoring (YAML criteria) ──> ranking
+job-hunter jobs / rescore ──> pure-Rust filtering (YAML criteria) ──> ranked, filtered list
 ```
 
 ## How it works, in depth
@@ -29,29 +29,39 @@ want in a job.**
 *criteria-independent facts*: extracted fields (title, company, salary range with currency
 and period, remote/hybrid/onsite, employment type, seniority, tech stack, …) plus
 fit measures relative to your experience (per-skill evidence, seniority fit,
-`overall_cv_match`, red/green flags). The agent is explicitly forbidden from judging
-against preferences — "salary is good" is banned; "£90k–£110k GBP/year" is a fact. This
-JSON is preserved verbatim in the `assessments` table. It is the expensive artifact, and
-it never goes stale when your preferences change.
+`overall_cv_match`, `domain_familiarity`, red/green flags). The agent is explicitly
+forbidden from judging against preferences — "salary is good" is banned; "£90k–£110k
+GBP/year" is a fact. This JSON is preserved verbatim in the `assessments` table. It is
+the expensive artifact, and it never goes stale when your preferences change.
 
 What you tell it about yourself is two documents. Your **experience** file is the
 required one and the whole evidence base: roles, projects, scope, skills, context. It is
 not a CV — nothing is summarised or truncated on the way into a prompt, so it is written
 to be complete rather than to fit a page. The optional **preferences** file says what you
-want from a role, and deliberately does *not* feed the fit measures: preferences may only
-shape the agent's prose (flags, notes, suggestions), never an extracted fact or a fit
-number, because ranking by what you want is layer 2's job and costs nothing to change.
+want from a role, and deliberately does *not* feed the fit measures. It gets its own
+holistic verdict instead: the agent weighs the whole posting against everything you said
+you wanted and grades it `poor` / `average` / `good` / `strong` / `exceptional`, with a
+paragraph saying which wants it meets and which it misses. That grade is reported in
+`jobs` and `show` and never enters the score — how well you fit a role and how much you
+want it are different questions, and mixing them into one number hides both.
 
 Both files are size-checked before they are opened — see `resources.max_file_bytes`
 below. That guard is the only limit on the way in, and it exists so a mistyped path
 cannot put something huge in a prompt, not to shave tokens.
 
-**Layer 2 — pure-logic filtering and weighting.** Your YAML `criteria:` section defines
-hard filters ("salary ≥ £85k", "remote or hybrid") and weighted soft criteria
-("overall_cv_match weight 5, salary vs a £120k target weight 3, …"). A small Rust engine
-evaluates them against the stored facts: sub-scores in 0..1 per criterion, weighted into a
-0–100 score, with hard-filter failures still scored but hidden from the default view.
-No LLM is involved anywhere in this layer.
+**The score.** One question — *how well does this candidate fit this role* — answered by
+the mean of the agent's two fit measures, `overall_cv_match` and `domain_familiarity`,
+each shown beside it in `jobs` so the arithmetic is visible. Nothing else moves it. A
+measure the agent couldn't produce is left out of the mean rather than counted as zero.
+Salary, seniority, work mode, preference match and the rest are facts about the posting,
+not measures of you, so they are reported and filtered on — never weighted in.
+
+**Layer 2 — pure-logic filtering.** Your YAML `criteria:` section defines hard filters
+("salary ≥ £85k", "remote or hybrid") over any stored fact. They are pass/fail, with no
+grading anywhere: a filter decides whether a job is worth looking at, and the score
+decides how it ranks among those that are. Failures keep their real score and are hidden
+from the default `jobs` view, counted in its summary line, and shown with
+`--include-filtered`. No LLM is involved anywhere in this layer.
 
 ### What triggers what
 
@@ -59,15 +69,17 @@ Every cached value is keyed by a hash of the thing it depends on:
 
 | You change...            | Key that changes                | What happens                                     |
 |--------------------------|---------------------------------|--------------------------------------------------|
-| criteria in the YAML     | `criteria_hash` (16-hex)        | scores recompute instantly, **zero LLM calls**   |
+| criteria in the YAML     | `criteria_hash` (16-hex)        | filters re-run instantly, **zero LLM calls**     |
 | your experience file     | `experience_hash` (sha256)      | `assess` re-runs jobs against the new evidence   |
 | your preferences file    | `preferences_hash` (16-hex)     | `assess` re-runs jobs against the new profile    |
 | the prompt design        | `assessment.prompt_version`     | bump it in the config to force re-assessment     |
 | your mind about a job    | nothing                         | record `feedback`; future assessments improve    |
 
 `criteria_hash` is computed from the *parsed* criteria, so reformatting or commenting the
-YAML doesn't invalidate anything — only semantic changes do. Scores are cached per
-`(assessment, criteria_hash)`, so flipping back to previous criteria is also free.
+YAML doesn't invalidate anything — only semantic changes do. Scores and filter verdicts are
+cached per `(assessment, criteria_hash)`, so flipping back to previous criteria is also free.
+The score itself no longer depends on the criteria at all; what a criteria edit changes is
+which jobs are shown.
 
 ### Job identity and dedupe
 
@@ -123,26 +135,33 @@ job-hunter install-service --now # systemd user service; survives reboots
 
 1. Browse job boards. On a posting you like, click the extension → **Save this job**.
 2. When you have a batch: `job-hunter assess` (this is the only step that spends tokens).
-3. `job-hunter jobs` — ranked table of what's worth applying to.
-4. `job-hunter show 12` — why it scored what it scored: facts, filter results, per-criterion points.
+3. `job-hunter jobs` — ranked table of what's worth applying to, with the CV-match and
+   domain columns the score is made of, your preference grade, and a summary line saying
+   how many the filters took out.
+4. `job-hunter show 12` — why it scored what it scored: facts, the two measures behind the
+   score, the preference verdict in full, filter results.
 5. Apply: `job-hunter status 12 applied --note "tailored CV v3"`. (`show` includes the
-   assessment's own `suggestions` — what to foreground for that posting, gaps to preempt.)
+   assessment's own suggestions — how to approach that posting, plus the gaps and
+   strengths the advice rests on.)
 6. Update as things move: `status 12 progressing`, `status 12 rejected`, `status 7 dismissed`.
 7. Disagree with an assessment? `job-hunter feedback 12 "overall match is too high - I have no C++ and it's core here"`. Future assessments see it.
-8. Preferences changed? Edit `criteria:` in the YAML, run `job-hunter rescore` — instant re-ranking, deltas shown, no tokens.
+8. Ruling something out wholesale? Edit `criteria.hard_filters` in the YAML, run
+   `job-hunter rescore` — instant, shows which jobs the edit let in or pushed out, no tokens.
+   (Changed your mind about what you *want*? That lives in your preferences file, and
+   editing it re-runs `assess`.)
 
 ## Command reference
 
 | Command | What it does |
 |---|---|
-| `jobs` | Ranked table (score desc). Default: statuses `new`+`assessed`, hard filters passed, duplicates hidden. |
-| `jobs --all` / `--applied` / `--rejected` / `--progressing` / `--status <s>` | Other status views. |
+| `jobs` | Ranked table (score desc), with the CV/domain columns behind the score and the preference grade. Default: statuses `new`+`assessed`, hard filters passed, duplicates hidden. Always ends with a `N shown · N filtered out · N not assessed` summary. |
+| `jobs --all` / `--applied` / `--rejected` / `--progressing` / `--status <s>` | Other status views (these never hide filter failures — a job you've applied to shouldn't vanish because the criteria moved on). |
 | `jobs --include-filtered` | Also show hard-filter failures (marked ✗). |
 | `jobs --min-score 70 --limit 10` | Trim the list. |
-| `show <id>` | Full detail: extraction, fit, score breakdown tables, duplicate URLs, history, feedback. |
+| `show <id>` | Full detail: extraction, fit, preference verdict, the two measures behind the score, filter table, duplicate URLs, history, feedback. |
 | `status <id> <status> [--note "..."]` | Transition with audit trail. |
 | `assess [ids...] [--force]` | Run the LLM for jobs lacking a current assessment. `--force` re-runs (e.g. after feedback). |
-| `rescore` | Recompute every score under current criteria. Instant; shows Δ vs previous criteria. |
+| `rescore` | Re-run the hard filters for every assessed job under the current criteria. Instant; flags which verdicts flipped. |
 | `feedback <id> "text"` | Job-linked feedback for the agent. |
 | `feedback --general "text"` | Feedback not tied to one job. |
 | `feedback --list` | Show distilled guidance + active items. |
@@ -169,11 +188,14 @@ resources:
                               # context. Not a CV - it reaches the agent whole,
                               # so write the full detail. Required.
   preferences_path: ~/want.md # optional: what you want from a role, in your own
-                              # words. Advisory only: shapes the agent's flags,
-                              # notes and suggestions, never an extracted fact or
-                              # a fit number. Hard preferences belong in
-                              # `criteria` below. A configured-but-unreadable
-                              # path is an error, not a silent skip.
+                              # words. Advisory: it earns its own holistic grade
+                              # (poor..exceptional, shown in `jobs` and `show`)
+                              # and shapes the agent's flags, notes and
+                              # suggestions - never an extracted fact, a fit
+                              # number, or the score. Absolute dealbreakers
+                              # belong in `criteria.hard_filters` below. A
+                              # configured-but-unreadable path is an error, not
+                              # a silent skip.
   max_file_bytes: 8192        # the one size limit, and a safety guard rather than
                               # a token lever: any input file bigger than this is
                               # refused UNREAD, so a mistyped path can never put
@@ -205,7 +227,7 @@ assessment:
                               # than refusing - see resources.max_file_bytes.
   feedback_recent_n: 10       # recent feedback items included per prompt
 
-criteria:                     # LAYER 2 - edits here never re-run the LLM
+criteria:                     # LAYER 2 - filtering only; edits never re-run the LLM
   currency_rates_to_gbp:      # normalize foreign salaries for comparison
     USD: 0.78
     EUR: 0.86
@@ -214,20 +236,20 @@ criteria:                     # LAYER 2 - edits here never re-run the LLM
     - {fact: work_mode, op: in, value: [remote, hybrid], if_missing: fail}
     # ops: gte, lte, eq, in, not_in
     # if_missing: pass|fail - what to do when the posting didn't say
-  soft:                       # weighted 0..1 sub-scores -> 0-100 total
-    - {fact: overall_cv_match, weight: 5}            # already 0..1
-    - {fact: seniority_fit, weight: 3}               # built-in: match=1.0 over=0.5 under=0.2
-    - {fact: salary_max_gbp, weight: 3, target: 120000}  # clamp(value/target)
-    - {fact: domain_familiarity, weight: 1}
-    # - {fact: "skill:rust", weight: 4}              # built-in: strong=1.0 moderate=0.6 weak=0.3 none=0
-    # - {fact: work_mode, weight: 2, map: {remote: 1.0, hybrid: 0.6}}  # enums need a map
-    # - missing_score: 0.5   # optional per-criterion sub-score when the fact is missing
+    # - {fact: overall_cv_match, op: gte, value: 0.5}      # fit measures are 0..1
+    # - {fact: preference_match, op: not_in, value: [poor], if_missing: pass}
+    # - {fact: "skill:rust", op: in, value: [strong, moderate], if_missing: fail}
 ```
+
+There are no weights, and no `soft:` section — the score is the mean of `overall_cv_match`
+and `domain_familiarity` and nothing here can move it. A config still carrying `soft:` is
+refused with an explanation rather than having its weights silently ignored.
 
 Valid `fact:` names: `salary_max_gbp`, `salary_min_gbp` (currency- and period-normalized
 to GBP/year: day×220, hour×1840), `work_mode`, `employment_type`, `seniority_level`,
-`seniority_fit`, `overall_cv_match`, `domain_familiarity`, `visa_sponsorship`, `country`,
-`skill:<name>`. Typos are caught by `config check`, which lists these.
+`seniority_fit`, `overall_cv_match`, `domain_familiarity`, `preference_match`,
+`visa_sponsorship`, `country`, `skill:<name>`. Typos are caught by `config check`, which
+lists these.
 
 ## The agent workspace
 
@@ -246,13 +268,22 @@ instructions as standard conventions:
 Each prompt carries only what changes per call — a task pointer, the JSON contract, the
 experience, the feedback digest, and the job text. The instruction prose lives in these files:
 edit them freely to tune behaviour, no rebuild needed. Files are created from built-in
-defaults when missing (`config init` or first use) and never overwritten once present;
-to reset one, delete it and rerun `config init`. `config check` shows which files you've
-edited versus the shipped defaults.
+defaults when missing (`config init` or first use); to reset one, delete it and rerun
+`config init`.
 
-The instructions in effect (AGENTS.md + the task's SKILL.md) are hashed into every
-assessment, so editing them re-runs affected jobs on the next `assess` — exactly like a
-`prompt_version` bump. Assessments made before this mechanism existed are grandfathered
+**A file you have edited is never overwritten** — that is the whole contract of this
+directory. A file you *haven't* edited belongs to the binary and is upgraded in place when
+a new release changes it, because otherwise new instructions would never reach an existing
+install. job-hunter tells them apart by hash, and anything it doesn't recognise counts as
+yours. `config check` labels each file `default`, `outdated default` (will be refreshed),
+or `edited`, and any refresh is announced on the run that performs it.
+
+The instructions in effect — AGENTS.md, the task's SKILL.md, and the JSON contract the
+prompt carries — are hashed into every assessment, so a change to any of them re-runs
+affected jobs on the next `assess`, exactly like a `prompt_version` bump. (The contract is
+in the binary rather than the workspace, and is hashed for precisely this reason: without
+it, adding a field to the facts schema would leave every stored assessment looking current
+while missing that field.) Assessments made before this mechanism existed are grandfathered
 and never silently re-run.
 
 ## Swapping the LLM agent

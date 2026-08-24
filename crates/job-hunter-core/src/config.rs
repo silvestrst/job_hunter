@@ -34,9 +34,11 @@ pub struct ResourcesConfig {
     /// detail rather than a document formatted to fit a page.
     pub experience_path: String,
     /// Optional: what the candidate wants from a role, in their own words.
-    /// Deliberately advisory - it shapes the agent's prose (flags, notes,
-    /// suggestions) but never the extracted facts or the fit numbers, because
-    /// hard preferences belong in `criteria`, which is scored without an LLM.
+    /// Deliberately advisory - it earns its own holistic grade
+    /// (`fit.preference_match`) and shapes the agent's prose, but never the
+    /// extracted facts, the fit measures, or the score, which answers how well
+    /// the candidate fits the role rather than how much they want it.
+    /// Dealbreakers belong in `criteria.hard_filters`, which needs no LLM.
     #[serde(default)]
     pub preferences_path: Option<String>,
     /// The one size limit, and a safety guard rather than a token lever: an
@@ -100,9 +102,10 @@ pub struct AssessmentConfig {
     pub feedback_recent_n: usize,
 }
 
-/// Layer-2 criteria. Deliberately serializable: the criteria hash is the
-/// sha256 of this struct's canonical JSON, so score caching keys off meaning,
-/// not YAML formatting. BTreeMap keeps map ordering deterministic.
+/// Layer-2 criteria: filtering, and nothing else. Deliberately serializable:
+/// the criteria hash is the sha256 of this struct's canonical JSON, so cached
+/// filter verdicts key off meaning, not YAML formatting. BTreeMap keeps map
+/// ordering deterministic.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CriteriaConfig {
@@ -110,8 +113,13 @@ pub struct CriteriaConfig {
     pub currency_rates_to_gbp: BTreeMap<String, f64>,
     #[serde(default)]
     pub hard_filters: Vec<HardFilter>,
-    #[serde(default)]
-    pub soft: Vec<SoftCriterion>,
+    /// Accepted only so a config written before scoring moved to the two fit
+    /// measures gets an explanation instead of "unknown field `soft`". Never
+    /// serialized, so its presence cannot change `criteria_hash`; `validate`
+    /// refuses it outright rather than ignoring weights the user still
+    /// believes in.
+    #[serde(default, skip_serializing)]
+    pub soft: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -140,22 +148,6 @@ pub enum MissingPolicy {
     #[default]
     Pass,
     Fail,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SoftCriterion {
-    pub fact: String,
-    pub weight: f64,
-    /// For numeric facts: sub-score = clamp(value / target, 0, 1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<f64>,
-    /// Optional explicit mapping for enum facts, e.g. {remote: 1.0, hybrid: 0.6}.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub map: Option<BTreeMap<String, f64>>,
-    /// Sub-score used when the fact is missing/unspecified (default 0.0).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub missing_score: Option<f64>,
 }
 
 fn default_port() -> u16 {
@@ -249,17 +241,16 @@ impl Config {
             ),
             _ => {}
         }
+        if self.criteria.soft.is_some() {
+            bail!(
+                "criteria.soft is no longer supported - the score is now the mean of the \
+                 agent's overall_cv_match and domain_familiarity, and criteria only filter. \
+                 Delete the `soft:` section; your hard_filters keep working unchanged"
+            );
+        }
         for f in &self.criteria.hard_filters {
             crate::scoring::FactRef::parse(&f.fact)
                 .with_context(|| format!("in criteria.hard_filters, fact '{}'", f.fact))?;
-        }
-        for s in &self.criteria.soft {
-            let fact = crate::scoring::FactRef::parse(&s.fact)
-                .with_context(|| format!("in criteria.soft, fact '{}'", s.fact))?;
-            fact.check_soft(s)?;
-            if s.weight <= 0.0 {
-                bail!("criteria.soft fact '{}' must have a positive weight", s.fact);
-            }
         }
         Ok(())
     }
@@ -286,9 +277,10 @@ resources:
   # cut before it reaches the agent, so write the full detail.
   experience_path: ~/Documents/experience.md
   # Optional, also markdown/plain text. What you want from your next role, in
-  # your own words. Advisory only: it shapes the agent's flags, notes and
-  # suggestions, never the extracted facts or the fit numbers. Hard
-  # preferences belong in `criteria` below, which is scored without an LLM:
+  # your own words. Advisory: the agent grades the whole posting against it
+  # (poor..exceptional, shown in `jobs` and `show`) and it shapes the flags,
+  # notes and suggestions - but it never touches the extracted facts, the fit
+  # measures, or the score. Dealbreakers belong in criteria.hard_filters below:
   # preferences_path: ~/Documents/preferences.md
   # Safety guard on the files above: anything larger is refused unread, so a
   # mistyped path can't put something huge in a prompt. ~8000 characters of
@@ -322,23 +314,32 @@ assessment:
   feedback_recent_n: 10            # recent feedback items included in prompts
 
 criteria:
-  # Layer-2 scoring: pure logic over stored assessment facts. Editing this
-  # section never re-runs the LLM - scores recompute instantly.
+  # Layer 2: filtering, and only filtering. Editing this section never re-runs
+  # the LLM - filter verdicts recompute instantly.
+  #
+  # There are no weights here. The score is the mean of the agent's two fit
+  # measures, overall_cv_match and domain_familiarity, and nothing else moves
+  # it. Every other fact - salary, seniority, work mode - is informational:
+  # shown in `jobs` and `show`, and available to filter on below.
+  #
+  # A filter is pass/fail. Failures are hidden from the default `jobs` view
+  # (counted in its summary line, shown with --include-filtered), never scored
+  # down.
   #
   # Valid fact names: salary_max_gbp, salary_min_gbp, work_mode,
   # employment_type, seniority_level, seniority_fit, overall_cv_match,
-  # domain_familiarity, visa_sponsorship, country, skill:<name>
+  # domain_familiarity, preference_match, visa_sponsorship, country,
+  # skill:<name>
   currency_rates_to_gbp:
     USD: 0.78
     EUR: 0.86
   hard_filters:
     - {fact: salary_max_gbp, op: gte, value: 85000, if_missing: pass}
     - {fact: work_mode, op: in, value: [remote, hybrid], if_missing: fail}
-  soft:
-    - {fact: overall_cv_match, weight: 5}
-    - {fact: seniority_fit, weight: 3}
-    - {fact: salary_max_gbp, weight: 3, target: 120000}
-    - {fact: domain_familiarity, weight: 1}
+    # ops: gte, lte, eq, in, not_in - if_missing: pass|fail
+    # - {fact: overall_cv_match, op: gte, value: 0.5}     # fit measures are 0..1
+    # - {fact: preference_match, op: not_in, value: [poor], if_missing: pass}
+    # - {fact: "skill:rust", op: in, value: [strong, moderate], if_missing: fail}
 "#;
 
 #[cfg(test)]
@@ -433,21 +434,37 @@ mod tests {
         let a: Config = serde_yaml::from_str(DEFAULT_CONFIG_YAML).unwrap();
         // Same criteria, different YAML formatting.
         let reformatted = DEFAULT_CONFIG_YAML.replace(
-            "- {fact: overall_cv_match, weight: 5}",
-            "- fact: overall_cv_match\n      weight: 5",
+            "- {fact: salary_max_gbp, op: gte, value: 85000, if_missing: pass}",
+            "- fact: salary_max_gbp\n      op: gte\n      value: 85000\n      if_missing: pass",
         );
         let b: Config = serde_yaml::from_str(&reformatted).unwrap();
         assert_eq!(a.criteria_hash(), b.criteria_hash());
 
-        let changed = DEFAULT_CONFIG_YAML.replace("weight: 5", "weight: 4");
+        let changed = DEFAULT_CONFIG_YAML.replace("value: 85000", "value: 95000");
         let c: Config = serde_yaml::from_str(&changed).unwrap();
         assert_ne!(a.criteria_hash(), c.criteria_hash());
     }
 
     #[test]
     fn unknown_fact_rejected() {
-        let bad = DEFAULT_CONFIG_YAML.replace("fact: overall_cv_match", "fact: nonsense_fact");
+        let bad = DEFAULT_CONFIG_YAML.replace("fact: salary_max_gbp", "fact: nonsense_fact");
         let config: Config = serde_yaml::from_str(&bad).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn a_leftover_soft_section_is_explained_not_ignored() {
+        // Silently dropping weights the user still believes in would be the
+        // one failure mode worse than refusing to start.
+        let yaml = format!("{DEFAULT_CONFIG_YAML}  soft:\n    - {{fact: overall_cv_match, weight: 5}}\n");
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(err.contains("no longer supported"), "{err}");
+        assert!(err.contains("mean of"), "{err}");
+        assert!(err.contains("hard_filters keep working"), "{err}");
+
+        // And it cannot quietly change what scores are cached against.
+        let clean: Config = serde_yaml::from_str(DEFAULT_CONFIG_YAML).unwrap();
+        assert_eq!(config.criteria_hash(), clean.criteria_hash());
     }
 }

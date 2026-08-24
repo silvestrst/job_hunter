@@ -1,7 +1,31 @@
-use super::{ensure_score, format_salary, job_label, Ctx};
+use super::{ensure_score, format_pct, format_salary, job_label, Ctx};
 use anyhow::Result;
 use comfy_table::{presets, Table};
-use job_hunter_core::scoring::{FactValue, ScoreResult};
+use job_hunter_core::assessment::schema::PreferenceMatch;
+use job_hunter_core::scoring::FactValue;
+
+/// One item under a `→ `, with any further lines aligned beneath it. Items are
+/// meant to be one line each, but nothing enforces that on the way in.
+fn print_bulleted(text: &str) {
+    let mut lines = text.trim_end().lines();
+    let Some(first) = lines.next() else { return };
+    println!("    → {first}");
+    for line in lines {
+        print_wrapped("      ", line);
+    }
+}
+
+/// Free-form prose at a fixed indent, blank lines kept so paragraphs stay
+/// paragraphs.
+fn print_wrapped(indent: &str, text: &str) {
+    for line in text.trim_end().lines() {
+        if line.trim().is_empty() {
+            println!();
+        } else {
+            println!("{indent}{line}");
+        }
+    }
+}
 
 fn fact_value_text(v: &FactValue) -> String {
     match v {
@@ -89,18 +113,43 @@ pub fn run(id: i64) -> Result<()> {
             if let Some(notes) = &facts.fit.notes {
                 println!("  notes: {notes}");
             }
-            if !facts.fit.suggestions.is_empty() {
-                println!("  suggestions:");
-                for s in &facts.fit.suggestions {
-                    println!("    → {s}");
+            let suggestions = &facts.fit.suggestions;
+            if !suggestions.is_empty() {
+                println!("\n## How to approach this one");
+                if let Some(advice) = &suggestions.advice {
+                    print_wrapped("  ", advice);
+                }
+                for (heading, items) in
+                    [("gaps", &suggestions.gaps), ("strengths", &suggestions.strengths)]
+                {
+                    if !items.is_empty() {
+                        println!("\n  {heading}:");
+                        for item in items {
+                            print_bulleted(item);
+                        }
+                    }
                 }
             }
 
-            println!("\n## Score: {:.1}/100  hard filters: {}",
-                score.score,
+            // Preferences are advisory: reported in full here, never scored.
+            if facts.fit.preference_match != PreferenceMatch::Unspecified
+                || facts.fit.preference_summary.is_some()
+            {
+                println!("\n## Preference match: {}", facts.fit.preference_match.as_str());
+                if let Some(summary) = &facts.fit.preference_summary {
+                    println!("  {summary}");
+                }
+                println!("  (advisory - what you want does not move the score)");
+            }
+
+            let breakdown = score.breakdown()?;
+            println!("\n## Score: {}/100  hard filters: {}",
+                format_pct(Some(score.score)),
                 if score.hard_filter_passed { "passed ✓" } else { "FAILED ✗" }
             );
-            let breakdown: ScoreResult = serde_json::from_str(&score.breakdown_json)?;
+            println!("  the mean of the two fit measures, and nothing else:");
+            println!("    CV match            {}", format_pct(breakdown.cv_match));
+            println!("    domain familiarity  {}", format_pct(breakdown.domain_familiarity));
             if !breakdown.filters.is_empty() {
                 let mut table = Table::new();
                 table.load_style(presets::UTF8_BORDERS_ONLY);
@@ -111,21 +160,6 @@ pub fn run(id: i64) -> Result<()> {
                         format!("{:?} {}", f.op, f.value),
                         fact_value_text(&f.actual),
                         format!("{:?}", f.outcome),
-                    ]);
-                }
-                println!("{table}");
-            }
-            if !breakdown.soft.is_empty() {
-                let mut table = Table::new();
-                table.load_style(presets::UTF8_BORDERS_ONLY);
-                table.set_header(vec!["Criterion", "Weight", "Value", "Sub-score", "Points"]);
-                for s in &breakdown.soft {
-                    table.add_row(vec![
-                        s.fact.clone(),
-                        format!("{}", s.weight),
-                        fact_value_text(&s.value),
-                        format!("{:.2}", s.sub_score),
-                        format!("{:.1}", s.contribution),
                     ]);
                 }
                 println!("{table}");

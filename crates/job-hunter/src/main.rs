@@ -14,7 +14,7 @@ struct Cli {
 enum Command {
     /// List saved jobs ranked by score (default: not-yet-applied, filters passed)
     Jobs(commands::jobs::JobsArgs),
-    /// Show everything about one job: fields, facts, score breakdown, history
+    /// Show everything about one job: fields, facts, score, filters, history
     Show { id: i64 },
     /// Change a job's status (applied, progressing, rejected, dismissed, new)
     Status {
@@ -25,7 +25,7 @@ enum Command {
     },
     /// Run the LLM assessment for jobs that don't have one yet
     Assess(commands::assess::AssessArgs),
-    /// Recompute all layer-2 scores for the current criteria (no LLM, instant)
+    /// Re-run the hard filters for the current criteria (no LLM, instant)
     Rescore,
     /// Record feedback on assessments, list it, or compact it into guidance
     Feedback(commands::feedback_cmd::FeedbackArgs),

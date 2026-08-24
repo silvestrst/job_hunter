@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "extracted": {
     "job_title": "Rust Developer",
     "company": "Cheapskate GmbH",
@@ -22,12 +22,15 @@
     "seniority_fit": "under",
     "domain_familiarity": 0.2,
     "overall_cv_match": 0.55,
+    "preference_match": "poor",
+    "preference_summary": "Onsite in Berlin against a stated remote-only want, and €60-70k is under the floor. Nothing here offsets either.",
     "red_flags": ["salary below market for the seniority"],
     "green_flags": [],
-    "suggestions": [
-      "Negotiate before onsite relocation costs - the offer is already below market.",
-      "Ask whether the level can be revisited given your seniority vs. their mid-level scope."
-    ],
+    "suggestions": {
+      "advice": "Only worth a conversation if the level is negotiable. Ask that first, before relocation comes up at all - the band is already below market for the scope, and a mid-level title would lock it there.",
+      "gaps": ["No adtech background"],
+      "strengths": ["Rust depth well beyond what the role asks for"]
+    },
     "notes": "Onsite abroad and under-levelled."
   },
   "confidence": {"salary": 0.9, "work_mode": 0.95, "overall": 0.8}

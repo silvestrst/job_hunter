@@ -11,8 +11,10 @@ use crate::workspace::AgentTask;
 
 /// The JSON contract shown to the agent. Kept as one literal so the schema the
 /// model sees and the serde types in `schema.rs` are reviewed side by side.
-const FACTS_CONTRACT: &str = r#"{
-  "schema_version": 2,
+/// Hashed into every assessment via `AgentTask::contract`, so editing it
+/// re-runs affected jobs rather than leaving stored facts missing new fields.
+pub(crate) const FACTS_CONTRACT: &str = r#"{
+  "schema_version": 3,
   "extracted": {
     "job_title": "string|null", "company": "string|null", "location": "string|null",
     "country": "ISO 3166-1 alpha-2 string|null",
@@ -41,8 +43,14 @@ const FACTS_CONTRACT: &str = r#"{
     "seniority_fit": "under|match|over|unspecified",
     "domain_familiarity": "number 0..1 (the candidate's familiarity with the role's industry)",
     "overall_cv_match": "number 0..1 (holistic candidate-to-role match)",
+    "preference_match": "poor|average|good|strong|exceptional|unspecified (holistic verdict against what the candidate wants; 'unspecified' if they said nothing about it)",
+    "preference_summary": "one paragraph on which of the candidate's wants this role meets and misses|null",
     "red_flags": ["string"], "green_flags": ["string"],
-    "suggestions": ["actionable, candidate-specific advice for applying to this role"],
+    "suggestions": {
+      "advice": "one or two paragraphs of actionable, candidate-specific advice for applying to THIS role|null",
+      "gaps": ["one line each: what the posting wants that the experience doesn't show"],
+      "strengths": ["one line each: what the candidate can lead with"]
+    },
     "notes": "one short paragraph of nuance"
   },
   "confidence": {"salary": "number 0..1", "work_mode": "number 0..1", "overall": "number 0..1"}

@@ -43,10 +43,16 @@ impl Ctx {
     }
 
     /// The agent workspace the LLM runs in, materializing any missing
-    /// instruction files from the built-in defaults (user edits are kept).
+    /// instruction file and refreshing any that still carries an older
+    /// binary's default (user edits are kept). Says so when it writes: an
+    /// instruction change re-runs assessments, and a run that suddenly has
+    /// work to do should explain itself.
     pub fn agent_workspace(&self) -> Result<AgentWorkspace> {
         let dir = AgentWorkspace::resolve_dir(&self.config.agent, &self.paths);
-        let (ws, _created) = AgentWorkspace::ensure(dir)?;
+        let (ws, written) = AgentWorkspace::ensure(dir)?;
+        for rel in &written {
+            println!("Updated instructions: {}", ws.dir.join(rel).display());
+        }
         Ok(ws)
     }
 }
@@ -109,6 +115,13 @@ pub fn ensure_score(
         .get_score(assessment.id, criteria_hash)?
         .expect("score row just inserted");
     Ok(Some((assessment, score)))
+}
+
+/// A 0-100 measure for a table cell. Whole numbers on purpose: the score is
+/// the mean of the two columns beside it, and that only reads as arithmetic if
+/// all three are shown at the same precision.
+pub fn format_pct(value: Option<f64>) -> String {
+    value.map_or_else(|| "-".to_string(), |v| format!("{v:.0}"))
 }
 
 /// "£85k-100k" style compact salary from stored facts, for table cells.

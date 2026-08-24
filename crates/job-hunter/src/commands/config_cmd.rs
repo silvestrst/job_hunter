@@ -20,19 +20,20 @@ pub fn init(force: bool) -> Result<()> {
         .with_context(|| format!("cannot write {}", paths.config_file.display()))?;
     println!("Wrote {}", paths.config_file.display());
 
-    // Agent workspace: missing instruction files only; edits are never touched.
-    let (workspace, created) = AgentWorkspace::ensure(paths.agent_workspace_dir.clone())?;
+    // Agent workspace: missing and outdated instruction files; edits are never
+    // touched.
+    let (workspace, written) = AgentWorkspace::ensure(paths.agent_workspace_dir.clone())?;
     for (rel, _) in workspace.file_status() {
-        if created.contains(&rel) {
+        if written.contains(&rel) {
             println!("Wrote {}", workspace.dir.join(rel).display());
         } else {
-            println!("Kept  {} (already exists)", workspace.dir.join(rel).display());
+            println!("Kept  {} (your edits)", workspace.dir.join(rel).display());
         }
     }
 
     println!("\nNext steps:");
     println!("  1. Edit resources.experience_path to point at your experience document.");
-    println!("  2. Adjust criteria to your preferences.");
+    println!("  2. Adjust criteria.hard_filters to rule out what you won't consider.");
     println!("  3. Review the agent instructions in {}.", workspace.dir.display());
     println!("  4. `job-hunter config check` to validate.");
     println!("  5. `job-hunter serve` and load the browser extension.");
@@ -91,6 +92,7 @@ pub fn check() -> Result<()> {
     for (rel, status) in &statuses {
         let label = match status {
             FileStatus::Default => "default",
+            FileStatus::Outdated => "outdated default (upgraded on next use or `config init`)",
             FileStatus::Edited => "edited",
             FileStatus::Missing => "missing (created on next use or `config init`)",
         };
@@ -111,9 +113,9 @@ pub fn check() -> Result<()> {
         None => println!("token:    (generated on first `job-hunter serve`)"),
     }
     println!(
-        "criteria: {} hard filter(s), {} soft criteria - hash {}",
+        "criteria: {} hard filter(s) - hash {} (filtering only; the score is the mean of \
+         overall_cv_match and domain_familiarity)",
         config.criteria.hard_filters.len(),
-        config.criteria.soft.len(),
         config.criteria_hash()
     );
     println!("\nConfig is valid.");

@@ -162,7 +162,7 @@ pub fn run_with_ctx(ctx: &Ctx, args: AssessArgs) -> Result<()> {
         match scored {
             Some((_, score)) => {
                 let mark = if score.hard_filter_passed { "✓" } else { "✗ filtered" };
-                print!(" score {:.1} {mark} ({elapsed:.1}s)", score.score);
+                print!(" score {} {mark} ({elapsed:.1}s)", crate::commands::format_pct(Some(score.score)));
             }
             None => print!(" assessed ({elapsed:.1}s)"),
         }
@@ -216,24 +216,30 @@ mod tests {
         let criteria_hash = ctx.config.criteria_hash();
         let (_, score) = ensure_score(&ctx, first.id, &criteria_hash).unwrap().unwrap();
         assert!(score.hard_filter_passed);
-        let expected = 100.0 * (5.0 * 0.82 + 3.0 * 1.0 + 3.0 * (110.0 / 120.0) + 1.0 * 0.6) / 12.0;
-        assert!((score.score - expected).abs() < 1e-6, "got {}", score.score);
+        // The mean of the fixture's overall_cv_match (0.82) and
+        // domain_familiarity (0.6) - the salary, seniority and work mode in
+        // the same fixture are recorded but never weighted.
+        assert!((score.score - 71.0).abs() < 1e-6, "got {}", score.score);
+        let breakdown = score.breakdown().unwrap();
+        assert_eq!(breakdown.cv_match, Some(82.0));
+        assert_eq!(breakdown.domain_familiarity, Some(60.0));
 
         // Re-running assess finds nothing new to do (no assessment rows change).
         assess_all(&ctx).unwrap();
     }
 
     #[test]
-    fn criteria_change_rescores_without_agent() {
+    fn criteria_change_refilters_without_agent() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", None));
         ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
         assess_all(&ctx).unwrap();
         let hash_before = ctx.config.criteria_hash();
         let (_, before) = ensure_score(&ctx, 1, &hash_before).unwrap().unwrap();
+        assert!(before.hard_filter_passed);
 
         // Tighten the salary filter; swap the agent for one that always fails
-        // to prove rescoring never invokes it.
+        // to prove refiltering never invokes it.
         ctx.config.criteria.hard_filters[0].value = serde_json::json!(150000);
         ctx.config.agent.command = mock_agent("mock-agent-fail.sh", None);
         let hash_after = ctx.config.criteria_hash();
@@ -241,7 +247,47 @@ mod tests {
 
         let (_, after) = ensure_score(&ctx, 1, &hash_after).unwrap().unwrap();
         assert!(!after.hard_filter_passed, "110k < 150k threshold must fail");
-        assert_eq!(before.score, after.score, "soft score unchanged by filter edit");
+        assert_eq!(before.score, after.score, "criteria cannot move the score at all");
+    }
+
+    #[test]
+    fn no_criteria_at_all_still_scores() {
+        // Filtering is now the whole of layer 2, so an empty criteria section
+        // must be a working configuration, not a zero-score one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(dir.path(), &mock_agent("mock-agent.sh", None));
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+        assess_all(&ctx).unwrap();
+
+        ctx.config.criteria.hard_filters.clear();
+        let (_, score) = ensure_score(&ctx, 1, &ctx.config.criteria_hash()).unwrap().unwrap();
+        assert!(score.hard_filter_passed);
+        assert!((score.score - 71.0).abs() < 1e-6, "got {}", score.score);
+    }
+
+    #[test]
+    fn preferences_produce_a_grade_that_never_reaches_the_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = dir.path().join("preferences.md");
+        std::fs::write(&preferences, "Remote only. No on-call rota.").unwrap();
+        let resources = format!("  preferences_path: {}", preferences.display());
+        let ctx = test_ctx_with_resources(
+            dir.path(),
+            &mock_agent("mock-agent.sh", None),
+            &resources,
+        );
+        ingest_payload(&ctx.db, &load_payload("sample1.json")).unwrap();
+        assess_all(&ctx).unwrap();
+
+        let (assessment, score) = ensure_score(&ctx, 1, &ctx.config.criteria_hash()).unwrap().unwrap();
+        let facts = assessment.facts().unwrap();
+        assert_eq!(
+            facts.fit.preference_match,
+            job_hunter_core::assessment::schema::PreferenceMatch::Strong
+        );
+        assert!(facts.fit.preference_summary.is_some());
+        // Same facts, same score as the run with no preferences at all.
+        assert!((score.score - 71.0).abs() < 1e-6, "got {}", score.score);
     }
 
     #[test]

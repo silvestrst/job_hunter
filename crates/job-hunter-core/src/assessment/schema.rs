@@ -10,7 +10,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AssessmentFacts {
@@ -87,23 +87,86 @@ pub struct Fit {
     pub skills_missing: Vec<String>,
     #[serde(default)]
     pub seniority_fit: SeniorityFit,
-    /// 0..1 vs the CV's industry history.
+    /// 0..1 vs the experience document's industry history. Half the score.
     #[serde(default)]
     pub domain_familiarity: Option<f64>,
-    /// 0..1 holistic CV match.
+    /// 0..1 holistic experience-to-role match. The other half of the score.
     #[serde(default)]
     pub overall_cv_match: Option<f64>,
+    /// Holistic verdict on the posting against what the candidate said they
+    /// want, as one closed grade. Advisory: it is reported, never scored, and
+    /// is "unspecified" when no preferences document was supplied.
+    #[serde(default)]
+    pub preference_match: PreferenceMatch,
+    /// One paragraph explaining `preference_match` - which wants this posting
+    /// meets, which it misses. Null when no preferences document was supplied.
+    #[serde(default)]
+    pub preference_summary: Option<String>,
     #[serde(default)]
     pub red_flags: Vec<String>,
     #[serde(default)]
     pub green_flags: Vec<String>,
-    /// Actionable, CV-specific advice for applying to this role (what to
-    /// emphasise, gaps to address, questions to ask) - not used by layer-2
-    /// scoring, shown to the candidate as-is.
+    /// Actionable, experience-specific advice for applying to this role - not
+    /// used by scoring, shown to the candidate as-is.
     #[serde(default)]
-    pub suggestions: Vec<String>,
+    pub suggestions: Suggestions,
     #[serde(default)]
     pub notes: Option<String>,
+}
+
+/// How to approach this application: the reasoning in prose, then the two
+/// lists that reasoning rests on. Three fields rather than one blob because
+/// the shape is what makes the agent produce all three parts - asked for free
+/// text, models reliably write the paragraphs and skip the breakdowns.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Suggestions {
+    /// One or two paragraphs: what to foreground, what to preempt, what to
+    /// ask. None when the agent had nothing worth saying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advice: Option<String>,
+    /// What this posting wants that the experience doesn't show.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<String>,
+    /// What the candidate can lead with.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strengths: Vec<String>,
+}
+
+impl Suggestions {
+    pub fn is_empty(&self) -> bool {
+        self.advice.as_ref().is_none_or(|a| a.trim().is_empty())
+            && self.gaps.is_empty()
+            && self.strengths.is_empty()
+    }
+}
+
+/// Accepts the current object and the bare array of strings that schema 2
+/// used, so `show` still renders assessments stored before the split rather
+/// than failing to parse them. The old items were discrete pieces of advice,
+/// which is what `advice` now holds.
+impl<'de> Deserialize<'de> for Suggestions {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Structured {
+                #[serde(default)]
+                advice: Option<String>,
+                #[serde(default)]
+                gaps: Vec<String>,
+                #[serde(default)]
+                strengths: Vec<String>,
+            },
+            Legacy(Vec<String>),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Structured { advice, gaps, strengths } => Self { advice, gaps, strengths },
+            Repr::Legacy(items) => Self {
+                advice: (!items.is_empty()).then(|| items.join("\n\n")),
+                ..Default::default()
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -200,6 +263,15 @@ string_enum!(CvEvidence {
     None => "none",
 });
 
+// Ordered worst to best; the order is the display order, nothing scores off it.
+string_enum!(PreferenceMatch {
+    Poor => "poor",
+    Average => "average",
+    Good => "good",
+    Strong => "strong",
+    Exceptional => "exceptional",
+});
+
 fn check_unit(name: &str, value: Option<f64>) -> Result<()> {
     if let Some(v) = value {
         if !(0.0..=1.0).contains(&v) {
@@ -271,12 +343,44 @@ mod tests {
 
     #[test]
     fn suggestions_round_trip() {
+        let json = r#"{"fit": {"suggestions": {
+            "advice": "Lead with the payments work.\n\nAsk about on-call.",
+            "gaps": ["no Kafka"],
+            "strengths": ["production Rust"]
+        }}}"#;
+        let facts: AssessmentFacts = serde_json::from_str(json).unwrap();
+        let s = &facts.fit.suggestions;
+        assert!(s.advice.as_deref().unwrap().contains("payments work"));
+        assert_eq!(s.gaps, vec!["no Kafka"]);
+        assert_eq!(s.strengths, vec!["production Rust"]);
+        assert!(!s.is_empty());
+
+        let again: AssessmentFacts =
+            serde_json::from_str(&serde_json::to_string(&facts).unwrap()).unwrap();
+        assert_eq!(again.fit.suggestions.gaps, s.gaps);
+        assert_eq!(again.fit.suggestions.advice, s.advice);
+    }
+
+    #[test]
+    fn schema_2_suggestions_still_parse() {
+        // Assessments stored as a bare array predate the split; `show` must
+        // still render them rather than failing on the whole facts blob.
         let json = r#"{"fit": {"suggestions": ["highlight your Rust experience", "ask about on-call"]}}"#;
         let facts: AssessmentFacts = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            facts.fit.suggestions,
-            vec!["highlight your Rust experience", "ask about on-call"]
-        );
+        let advice = facts.fit.suggestions.advice.unwrap();
+        assert!(advice.contains("highlight your Rust experience"));
+        assert!(advice.contains("ask about on-call"));
+        assert!(facts.fit.suggestions.gaps.is_empty());
+    }
+
+    #[test]
+    fn absent_suggestions_are_empty_not_missing() {
+        let facts: AssessmentFacts = serde_json::from_str(r#"{"fit": {}}"#).unwrap();
+        assert!(facts.fit.suggestions.is_empty());
+        // Whitespace-only advice is nothing to show either.
+        let facts: AssessmentFacts =
+            serde_json::from_str(r#"{"fit": {"suggestions": {"advice": "  "}}}"#).unwrap();
+        assert!(facts.fit.suggestions.is_empty());
     }
 
     #[test]
@@ -284,6 +388,22 @@ mod tests {
         let facts: AssessmentFacts =
             serde_json::from_str(r#"{"extracted": {"work_mode": "wework-only"}}"#).unwrap();
         assert_eq!(facts.extracted.work_mode, WorkMode::Unspecified);
+    }
+
+    #[test]
+    fn preference_match_defaults_to_unspecified() {
+        // No preferences document -> the agent leaves both fields out, and
+        // that must read as "not assessed", not as a bad grade.
+        let facts: AssessmentFacts = serde_json::from_str(r#"{"fit": {}}"#).unwrap();
+        assert_eq!(facts.fit.preference_match, PreferenceMatch::Unspecified);
+        assert!(facts.fit.preference_summary.is_none());
+
+        let facts: AssessmentFacts = serde_json::from_str(
+            r#"{"fit": {"preference_match": "strong", "preference_summary": "Remote and no on-call."}}"#,
+        )
+        .unwrap();
+        assert_eq!(facts.fit.preference_match, PreferenceMatch::Strong);
+        assert_eq!(facts.fit.preference_summary.as_deref(), Some("Remote and no on-call."));
     }
 
     #[test]

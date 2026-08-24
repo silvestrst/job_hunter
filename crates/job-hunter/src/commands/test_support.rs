@@ -50,11 +50,6 @@ criteria:
   hard_filters:
     - {{fact: salary_max_gbp, op: gte, value: 85000, if_missing: pass}}
     - {{fact: work_mode, op: in, value: [remote, hybrid], if_missing: fail}}
-  soft:
-    - {{fact: overall_cv_match, weight: 5}}
-    - {{fact: seniority_fit, weight: 3}}
-    - {{fact: salary_max_gbp, weight: 3, target: 120000}}
-    - {{fact: domain_familiarity, weight: 1}}
 "#,
         experience = fixtures.join("sample-experience.md").display(),
         command = command_yaml.join(", "),

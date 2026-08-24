@@ -119,6 +119,16 @@ pub struct Score {
     pub breakdown_json: String,
 }
 
+impl Score {
+    /// The score's components and filter results. Fields added since a row was
+    /// written default rather than failing the parse, so an older cached
+    /// breakdown still renders.
+    pub fn breakdown(&self) -> Result<crate::scoring::ScoreResult> {
+        serde_json::from_str(&self.breakdown_json)
+            .context("stored breakdown_json no longer parses")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FeedbackItem {
     pub id: i64,

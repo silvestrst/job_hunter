@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "extracted": {
     "job_title": "Senior Rust Engineer",
     "company": "Acme Ltd",
@@ -27,13 +27,21 @@
     "seniority_fit": "match",
     "domain_familiarity": 0.6,
     "overall_cv_match": 0.82,
+    "preference_match": "strong",
+    "preference_summary": "Remote-first with quarterly meetups matches the stated want, and the £90-110k range clears the floor. The six-stage process runs against the preference for a short pipeline.",
     "red_flags": ["six-stage interview process"],
     "green_flags": ["salary stated explicitly"],
-    "suggestions": [
-      "Lead with your payments/fintech Rust work - it maps directly onto their core stack.",
-      "Address the Kafka gap head-on: mention any adjacent streaming/queue experience.",
-      "Ask about the six-stage process up front to gauge timeline before investing further."
-    ],
+    "suggestions": {
+      "advice": "Lead with the payments work: their core stack is the one you rebuilt, and that is a stronger opening than the language match everyone else will claim.\n\nAddress Kafka before they raise it - naming the adjacent queue work you have done reads as candour rather than a gap. Ask about the six-stage process up front, so you can judge the timeline before investing in it.",
+      "gaps": [
+        "No Kafka, which the posting lists as nice-to-have",
+        "Kubernetes evidence is thin against a stack that assumes it"
+      ],
+      "strengths": [
+        "Production Rust at the scale the role describes",
+        "Payments domain experience the posting is built around"
+      ]
+    },
     "notes": "Strong core-skills match; the missing Kafka experience is listed as nice-to-have."
   },
   "confidence": {"salary": 0.9, "work_mode": 0.85, "overall": 0.85}
