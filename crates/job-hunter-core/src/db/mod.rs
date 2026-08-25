@@ -292,6 +292,18 @@ impl Db {
         Ok(())
     }
 
+    pub fn count_jobs(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?)
+    }
+
+    /// Deletes every job, cascading to its assessments, scores, and status
+    /// history. Feedback survives: its `job_id` is FK'd `ON DELETE SET NULL`
+    /// rather than cascade, because it's learned guidance that outlives the
+    /// job it was recorded against.
+    pub fn delete_all_jobs(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM jobs", [])?)
+    }
+
     /// Another non-duplicate job with the same normalized title+company, if any.
     pub fn find_title_company_match(
         &self,
@@ -771,5 +783,27 @@ mod tests {
 
         assert_eq!(db.mark_all_feedback_compacted().unwrap(), 2);
         assert!(db.active_feedback(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_all_jobs_cascades_but_keeps_feedback() {
+        let db = seeded_db();
+        db.insert_job("https://example.com/jobs/2", "https://example.com/jobs/2", "example.com", Some("Job Two"), "text two", None, "extension")
+            .unwrap();
+        let a1 = db.upsert_assessment(&assessment("exp1", None, "{}")).unwrap();
+        db.upsert_score(1, a1, "crit1", 80.0, true, "[]").unwrap();
+        db.insert_feedback(Some(1), "scored too high").unwrap();
+        db.set_feedback_digest("rule 1").unwrap();
+
+        assert_eq!(db.count_jobs().unwrap(), 2);
+        assert_eq!(db.delete_all_jobs().unwrap(), 2);
+        assert_eq!(db.count_jobs().unwrap(), 0);
+        assert!(db.get_score(a1, "crit1").unwrap().is_none(), "scores must cascade");
+        assert!(db.latest_assessment(1).unwrap().is_none(), "assessments must cascade");
+
+        let feedback = db.active_feedback(None).unwrap();
+        assert_eq!(feedback.len(), 1, "feedback must survive job deletion");
+        assert_eq!(feedback[0].job_label, None, "its job_id is nulled, not the row deleted");
+        assert_eq!(db.get_feedback_digest().unwrap().as_deref(), Some("rule 1"));
     }
 }

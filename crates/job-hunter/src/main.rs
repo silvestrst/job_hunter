@@ -45,8 +45,9 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Delete a mis-saved job (cascades to its assessments and scores)
-    Delete { id: i64 },
+    /// Delete a mis-saved job, or every job with --all (cascades to
+    /// assessments/scores/history; feedback is kept)
+    Delete(commands::delete::DeleteArgs),
 }
 
 #[derive(Subcommand)]
@@ -75,7 +76,7 @@ fn main() {
             ConfigAction::Init { force } => commands::config_cmd::init(force),
             ConfigAction::Check => commands::config_cmd::check(),
         },
-        Command::Delete { id } => commands::delete::run(id),
+        Command::Delete(args) => commands::delete::run(args),
     };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
