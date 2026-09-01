@@ -92,17 +92,29 @@ pub fn ensure_score(
     job_id: i64,
     criteria_hash: &str,
 ) -> Result<Option<(Assessment, Score)>> {
-    let Some(assessment) = ctx.db.latest_assessment(job_id)? else {
+    ensure_score_db(&ctx.db, &ctx.config, job_id, criteria_hash)
+}
+
+/// Same as [`ensure_score`], but over a bare `Db` + `Config` rather than a
+/// CLI `Ctx` - the shape the web views need, since they hold a shared,
+/// mutex-guarded `Db` rather than owning one outright.
+pub fn ensure_score_db(
+    db: &Db,
+    config: &Config,
+    job_id: i64,
+    criteria_hash: &str,
+) -> Result<Option<(Assessment, Score)>> {
+    let Some(assessment) = db.latest_assessment(job_id)? else {
         return Ok(None);
     };
-    if let Some(score) = ctx.db.get_score(assessment.id, criteria_hash)? {
+    if let Some(score) = db.get_score(assessment.id, criteria_hash)? {
         return Ok(Some((assessment, score)));
     }
     let facts = assessment.facts()?;
-    let result = scoring::compute_score(&ctx.config.criteria, &facts)
+    let result = scoring::compute_score(&config.criteria, &facts)
         .with_context(|| format!("scoring job {job_id}"))?;
     let breakdown_json = serde_json::to_string(&result)?;
-    ctx.db.upsert_score(
+    db.upsert_score(
         job_id,
         assessment.id,
         criteria_hash,
@@ -110,11 +122,26 @@ pub fn ensure_score(
         result.hard_filter_passed,
         &breakdown_json,
     )?;
-    let score = ctx
-        .db
+    let score = db
         .get_score(assessment.id, criteria_hash)?
         .expect("score row just inserted");
     Ok(Some((assessment, score)))
+}
+
+/// Opens `url` in the user's default browser (Linux `xdg-open`, macOS `open`,
+/// Windows `cmd /C start`). Prints the URL as a fallback if that fails, e.g.
+/// over SSH with no display.
+pub fn open_browser(url: &str) {
+    let spawned = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if spawned.is_err() {
+        println!("Could not launch a browser automatically - open this URL:\n  {url}");
+    }
 }
 
 /// A 0-100 measure for a table cell. Whole numbers on purpose: the score is

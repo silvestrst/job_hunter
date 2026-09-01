@@ -1,46 +1,99 @@
-use super::{ensure_score, format_age, format_pct, format_salary, Ctx};
+use super::{ensure_score_db, format_age, format_pct, format_salary, open_browser, Ctx};
 use anyhow::Result;
 use clap::Args;
 use comfy_table::{presets, Cell, Table};
-use job_hunter_core::db::{JobFilter, JobStatus};
+use job_hunter_core::config::Config;
+use job_hunter_core::db::{Db, JobFilter, JobStatus};
 
-#[derive(Args)]
+#[derive(Args, serde::Deserialize)]
 pub struct JobsArgs {
     /// Include every status
     #[arg(long, conflicts_with_all = ["applied", "rejected", "progressing", "status"])]
+    #[serde(default)]
     pub all: bool,
     #[arg(long, conflicts_with_all = ["rejected", "progressing", "status"])]
+    #[serde(default)]
     pub applied: bool,
     #[arg(long, conflicts_with_all = ["progressing", "status"])]
+    #[serde(default)]
     pub rejected: bool,
     #[arg(long, conflicts_with = "status")]
+    #[serde(default)]
     pub progressing: bool,
     /// Filter by an explicit status
     #[arg(long)]
+    #[serde(default)]
     pub status: Option<String>,
     /// Also show jobs that failed the hard filters (marked ✗)
     #[arg(long)]
+    #[serde(default)]
     pub include_filtered: bool,
     #[arg(long)]
+    #[serde(default)]
     pub min_score: Option<f64>,
     #[arg(long)]
+    #[serde(default)]
     pub limit: Option<usize>,
+    /// Open the results in your browser instead (served by `job-hunter serve`)
+    #[arg(long)]
+    #[serde(skip)]
+    pub web: bool,
 }
 
-struct Row {
-    id: i64,
-    score: Option<f64>,
-    cv_match: Option<f64>,
-    domain: Option<f64>,
-    preference: String,
-    filters_passed: Option<bool>,
-    title: String,
-    company: String,
-    salary: String,
-    mode: String,
-    level: String,
-    status: String,
-    age: String,
+/// Query string for the same filters, e.g. `?applied=true&min_score=70` - so
+/// `--web` opens the web view scoped to whatever the CLI call just asked for.
+fn web_url(port: u16, args: &JobsArgs) -> String {
+    let mut params = Vec::new();
+    if args.all {
+        params.push("all=true".to_string());
+    }
+    if args.applied {
+        params.push("applied=true".to_string());
+    }
+    if args.rejected {
+        params.push("rejected=true".to_string());
+    }
+    if args.progressing {
+        params.push("progressing=true".to_string());
+    }
+    if let Some(s) = &args.status {
+        params.push(format!("status={s}"));
+    }
+    if args.include_filtered {
+        params.push("include_filtered=true".to_string());
+    }
+    if let Some(v) = args.min_score {
+        params.push(format!("min_score={v}"));
+    }
+    if let Some(v) = args.limit {
+        params.push(format!("limit={v}"));
+    }
+    let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
+    format!("http://127.0.0.1:{port}/jobs{query}")
+}
+
+pub struct Row {
+    pub id: i64,
+    pub score: Option<f64>,
+    pub cv_match: Option<f64>,
+    pub domain: Option<f64>,
+    pub preference: String,
+    pub filters_passed: Option<bool>,
+    pub title: String,
+    pub company: String,
+    pub salary: String,
+    pub mode: String,
+    pub level: String,
+    pub status: String,
+    pub age: String,
+}
+
+pub struct RowsResult {
+    pub rows: Vec<Row>,
+    /// Jobs hidden by the default view because they failed the hard filters.
+    pub hidden: usize,
+    /// Jobs dropped by `--min-score` or `--limit`.
+    pub trimmed: usize,
 }
 
 /// "-" for the enum's absent case, so an unassessed preference never reads as
@@ -55,7 +108,18 @@ fn or_dash(value: &str) -> String {
 
 pub fn run(args: JobsArgs) -> Result<()> {
     let ctx = Ctx::load()?;
-    let criteria_hash = ctx.config.criteria_hash();
+    let result = build_rows(&ctx.db, &ctx.config, &args)?;
+    render_text(&result);
+    if args.web {
+        open_browser(&web_url(ctx.config.server.port, &args));
+    }
+    Ok(())
+}
+
+/// Fetches, scores, filters and sorts every job for this view - the same
+/// logic behind the terminal table and the `/jobs` web page.
+pub fn build_rows(db: &Db, config: &Config, args: &JobsArgs) -> Result<RowsResult> {
+    let criteria_hash = config.criteria_hash();
 
     let statuses = if args.all {
         None
@@ -74,12 +138,12 @@ pub fn run(args: JobsArgs) -> Result<()> {
         .as_deref()
         .is_some_and(|s| s == [JobStatus::New, JobStatus::Assessed]);
 
-    let jobs = ctx.db.list_jobs(&JobFilter { statuses, include_duplicates: false })?;
+    let jobs = db.list_jobs(&JobFilter { statuses, include_duplicates: false })?;
     let mut rows = Vec::new();
     let mut hidden = 0usize;
     let mut trimmed = 0usize;
     for job in &jobs {
-        let scored = ensure_score(&ctx, job.id, &criteria_hash)?;
+        let scored = ensure_score_db(db, config, job.id, &criteria_hash)?;
         let mut row = Row {
             id: job.id,
             score: None,
@@ -137,6 +201,14 @@ pub fn run(args: JobsArgs) -> Result<()> {
         rows.truncate(limit);
     }
 
+    Ok(RowsResult { rows, hidden, trimmed })
+}
+
+fn render_text(result: &RowsResult) {
+    let RowsResult { rows, hidden, trimmed } = result;
+    let hidden = *hidden;
+    let trimmed = *trimmed;
+
     if rows.is_empty() {
         println!("No jobs to show.");
     } else {
@@ -146,7 +218,7 @@ pub fn run(args: JobsArgs) -> Result<()> {
             "ID", "Score", "CV", "Domain", "Pref", "✓", "Title", "Company", "Salary", "Mode",
             "Level", "Status", "Age",
         ]);
-        for row in &rows {
+        for row in rows {
             table.add_row(vec![
                 Cell::new(row.id),
                 Cell::new(format_pct(row.score)),
@@ -195,5 +267,4 @@ pub fn run(args: JobsArgs) -> Result<()> {
     if unassessed > 0 {
         println!("Run `job-hunter assess` to assess the rest.");
     }
-    Ok(())
 }

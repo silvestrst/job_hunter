@@ -11,6 +11,7 @@ use axum::Router;
 use job_hunter_core::db::Db;
 use job_hunter_core::ingest::{ingest_payload, ScrapedPayload};
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub const TOKEN_HEADER: &str = "x-api-token";
@@ -20,12 +21,20 @@ const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
     pub token: String,
+    /// Reloaded fresh on every web-view request, same as the CLI does per
+    /// invocation, so criteria/resource edits show up without a server restart.
+    pub config_file: PathBuf,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/jobs", post(save_job))
+        // Same-origin, loopback-only pages for the local browser - no token,
+        // matching /api/health's trust model (a plain browser navigation
+        // can't send a custom header anyway).
+        .route("/jobs", get(crate::web::jobs_page))
+        .route("/jobs/{id}", get(crate::web::show_page))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
@@ -88,16 +97,26 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn test_state() -> AppState {
+    /// `dir` must outlive the returned state - the web routes reload
+    /// `config_file` from disk on every request.
+    fn test_state(dir: &std::path::Path) -> AppState {
+        let config_file = dir.join("config.yaml");
+        std::fs::write(&config_file, "resources:\n  experience_path: \"x\"\nagent:\n  command: [\"true\"]\n").unwrap();
         AppState {
             db: Arc::new(Mutex::new(Db::open_in_memory().unwrap())),
             token: "secret".into(),
+            config_file,
         }
     }
 
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn body_text(response: axum::response::Response) -> String {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     fn job_request(token: Option<&str>, payload: &str) -> Request<Body> {
@@ -115,7 +134,8 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_open() {
-        let response = router(test_state())
+        let dir = tempfile::tempdir().unwrap();
+        let response = router(test_state(dir.path()))
             .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -125,7 +145,8 @@ mod tests {
 
     #[tokio::test]
     async fn post_requires_token() {
-        let app = router(test_state());
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
         let response = app.clone().oneshot(job_request(None, PAYLOAD)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let response = app.oneshot(job_request(Some("wrong"), PAYLOAD)).await.unwrap();
@@ -134,7 +155,8 @@ mod tests {
 
     #[tokio::test]
     async fn post_saves_then_dedupes() {
-        let app = router(test_state());
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
         let response = app.clone().oneshot(job_request(Some("secret"), PAYLOAD)).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let first = body_json(response).await;
@@ -150,11 +172,72 @@ mod tests {
 
     #[tokio::test]
     async fn post_rejects_bad_payload() {
-        let app = router(test_state());
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
         let empty_text = r#"{"url": "https://example.com/x", "text": "  "}"#;
         let response = app.clone().oneshot(job_request(Some("secret"), empty_text)).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let response = app.oneshot(job_request(Some("secret"), "not json")).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn jobs_page_lists_saved_jobs_and_escapes_html() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
+        let payload = r#"{"url": "https://example.com/jobs/1", "title": "<b>Rust</b> & Friends", "text": "job text"}"#;
+        app.clone().oneshot(job_request(Some("secret"), payload)).await.unwrap();
+
+        let response =
+            app.oneshot(Request::get("/jobs").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("&lt;b&gt;Rust&lt;/b&gt; &amp; Friends"));
+        assert!(!body.contains("<b>Rust</b>"));
+        assert!(body.contains("1 shown"));
+    }
+
+    #[tokio::test]
+    async fn jobs_page_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
+        let response =
+            app.oneshot(Request::get("/jobs").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("No jobs to show"));
+    }
+
+    #[tokio::test]
+    async fn jobs_page_rejects_bad_status_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
+        let response = app
+            .oneshot(Request::get("/jobs?status=not-a-real-status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn show_page_unassessed_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
+        app.clone().oneshot(job_request(Some("secret"), PAYLOAD)).await.unwrap();
+
+        let response =
+            app.oneshot(Request::get("/jobs/1").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("Not assessed yet"));
+        assert!(body.contains("job-hunter assess 1"));
+    }
+
+    #[tokio::test]
+    async fn show_page_missing_job_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(dir.path()));
+        let response =
+            app.oneshot(Request::get("/jobs/999").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -1,8 +1,39 @@
-use super::{ensure_score, format_pct, format_salary, job_label, Ctx};
+use super::{ensure_score_db, format_pct, format_salary, job_label, open_browser, Ctx};
 use anyhow::Result;
+use clap::Args;
 use comfy_table::{presets, Table};
 use job_hunter_core::assessment::schema::PreferenceMatch;
+use job_hunter_core::config::Config;
+use job_hunter_core::db::{Assessment, Db, FeedbackItem, Job, Score, StatusEvent};
 use job_hunter_core::scoring::FactValue;
+
+#[derive(Args)]
+pub struct ShowArgs {
+    pub id: i64,
+    /// Open this job in your browser instead (served by `job-hunter serve`)
+    #[arg(long)]
+    pub web: bool,
+}
+
+/// Everything the show view needs, fetched once - the CLI prints it as text,
+/// the `/jobs/:id` web page renders the same data as HTML.
+pub struct ShowData {
+    pub job: Job,
+    pub duplicates: Vec<Job>,
+    pub scored: Option<(Assessment, Score)>,
+    pub events: Vec<StatusEvent>,
+    pub feedback: Vec<FeedbackItem>,
+}
+
+pub fn load(db: &Db, config: &Config, id: i64) -> Result<ShowData> {
+    let job = db.get_job(id)?;
+    let duplicates = db.duplicates_of(id)?;
+    let criteria_hash = config.criteria_hash();
+    let scored = ensure_score_db(db, config, id, &criteria_hash)?;
+    let events = db.status_events(id)?;
+    let feedback = db.feedback_for_job(id)?;
+    Ok(ShowData { job, duplicates, scored, events, feedback })
+}
 
 /// One item under a `→ `, with any further lines aligned beneath it. Items are
 /// meant to be one line each, but nothing enforces that on the way in.
@@ -27,7 +58,7 @@ fn print_wrapped(indent: &str, text: &str) {
     }
 }
 
-fn fact_value_text(v: &FactValue) -> String {
+pub(crate) fn fact_value_text(v: &FactValue) -> String {
     match v {
         FactValue::Number(n) => {
             if *n >= 1000.0 {
@@ -41,12 +72,21 @@ fn fact_value_text(v: &FactValue) -> String {
     }
 }
 
-pub fn run(id: i64) -> Result<()> {
+pub fn run(args: ShowArgs) -> Result<()> {
     let ctx = Ctx::load()?;
-    let job = ctx.db.get_job(id)?;
-    let criteria_hash = ctx.config.criteria_hash();
+    let data = load(&ctx.db, &ctx.config, args.id)?;
+    print_text(&data)?;
+    if args.web {
+        open_browser(&format!("http://127.0.0.1:{}/jobs/{}", ctx.config.server.port, args.id));
+    }
+    Ok(())
+}
 
-    println!("# {} [{}]", job_label(&job), job.status);
+fn print_text(data: &ShowData) -> Result<()> {
+    let job = &data.job;
+    let id = job.id;
+
+    println!("# {} [{}]", job_label(job), job.status);
     println!("  id:      {}", job.id);
     println!("  url:     {}", job.url);
     println!("  domain:  {}  source: {}  saved: {}", job.domain, job.source, job.created_at);
@@ -56,17 +96,16 @@ pub fn run(id: i64) -> Result<()> {
     if let Some(dup) = job.duplicate_of {
         println!("  duplicate of job #{dup} (same title + company)");
     }
-    let duplicates = ctx.db.duplicates_of(id)?;
-    if !duplicates.is_empty() {
+    if !data.duplicates.is_empty() {
         println!("  also seen at:");
-        for d in &duplicates {
+        for d in &data.duplicates {
             println!("    - {} (job #{})", d.url, d.id);
         }
     }
 
     println!("\n## Original posting\n{}", job.content_text);
 
-    match ensure_score(&ctx, id, &criteria_hash)? {
+    match &data.scored {
         None => println!("\nNot assessed yet - run `job-hunter assess {id}`."),
         Some((assessment, score)) => {
             let facts = assessment.facts()?;
@@ -167,19 +206,17 @@ pub fn run(id: i64) -> Result<()> {
         }
     }
 
-    let events = ctx.db.status_events(id)?;
-    if !events.is_empty() {
+    if !data.events.is_empty() {
         println!("\n## History");
-        for e in &events {
+        for e in &data.events {
             let note = e.note.as_deref().map(|n| format!(" - {n}")).unwrap_or_default();
             println!("  {}  {} → {}{}", e.created_at, e.from_status.as_deref().unwrap_or("-"), e.to_status, note);
         }
     }
 
-    let feedback = ctx.db.feedback_for_job(id)?;
-    if !feedback.is_empty() {
+    if !data.feedback.is_empty() {
         println!("\n## Feedback");
-        for f in &feedback {
+        for f in &data.feedback {
             println!("  {}  {} [{}]", f.created_at, f.text, f.state);
         }
     }

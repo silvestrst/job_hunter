@@ -22,6 +22,7 @@ pub fn run(port_override: Option<u16>) -> Result<()> {
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
         token: api_token.clone(),
+        config_file: paths.config_file.clone(),
     };
 
     let runtime = tokio::runtime::Runtime::new()?;

@@ -1,5 +1,6 @@
 mod commands;
 mod server;
+mod web;
 
 use clap::{Parser, Subcommand};
 
@@ -15,7 +16,7 @@ enum Command {
     /// List saved jobs ranked by score (default: not-yet-applied, filters passed)
     Jobs(commands::jobs::JobsArgs),
     /// Show everything about one job: fields, facts, score, filters, history
-    Show { id: i64 },
+    Show(commands::show::ShowArgs),
     /// Change a job's status (applied, progressing, rejected, dismissed, new)
     Status {
         id: i64,
@@ -65,7 +66,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Jobs(args) => commands::jobs::run(args),
-        Command::Show { id } => commands::show::run(id),
+        Command::Show(args) => commands::show::run(args),
         Command::Status { id, status, note } => commands::status_cmd::run(id, &status, note.as_deref()),
         Command::Assess(args) => commands::assess::run(args),
         Command::Rescore => commands::rescore::run(),
